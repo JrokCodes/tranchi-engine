@@ -44,7 +44,9 @@ _TIMEOUT = 30.0
 _RETRY_ATTEMPTS = 3
 _RETRY_BASE_DELAY = 2.0
 _INTER_REQUEST_DELAY = 0.75   # seconds between detail-page GETs (jitter applied)
-_ENRICH_DETAIL = True         # set False to skip detail-page second pass
+_ENRICH_DETAIL = False        # detail pass adds ~99 GETs (~3min) for price/photos/restrictions
+                              # which we don't surface yet — run as a separate weekly pass if needed.
+                              # Set True for a one-off enrichment run.
 
 # Land Bank status → canonical status used downstream
 _STATUS_MAP: dict[str, str] = {
