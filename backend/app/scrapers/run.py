@@ -59,6 +59,7 @@ from app.scrapers.fiscal_officer import FiscalOfficerScraper  # noqa: E402
 from app.scrapers.landbank import LandBankScraper  # noqa: E402
 from app.scrapers.models import ScrapeResult  # noqa: E402
 from app.scrapers.prefilter import prefilter  # noqa: E402
+from app.scrapers.probate import ProbateScraper  # noqa: E402
 from app.scrapers.sheriff import SheriffSalesScraper  # noqa: E402
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -72,7 +73,7 @@ _SCRAPERS: dict[str, type] = {
     "land_bank": LandBankScraper,
     "sheriff_sales": SheriffSalesScraper,
     "fiscal_officer": FiscalOfficerScraper,
-    # "probate": ProbateScraper,              # Phase B
+    "probate": ProbateScraper,
 }
 
 
@@ -139,6 +140,11 @@ async def _run_scraper(
         else:
             logger.info("%s: no prior successful run — full backfill", site_name_for_query)
         scraper = scraper_cls(last_run_date=last_run_date)
+    elif scraper_key == "probate":
+        # Probate manages its own cursor (tranchi.probate_cursor) and signal
+        # writes internally, so it needs the pool + dry_run flag at construction.
+        # It still returns RawListings that flow through the standard listing path.
+        scraper = scraper_cls(pool=pool, dry_run=dry_run)
     else:
         scraper = scraper_cls()
     site_name = scraper.site_name
