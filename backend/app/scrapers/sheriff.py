@@ -238,7 +238,7 @@ def _parse_result_page(html: str, fallback_date: date) -> list[RawListing]:
 
         listings.append(
             RawListing(
-                source_site="sheriff_sales",
+                source_site="Cuyahoga Sheriff Sales",
                 signal_type="tax_delinquent_foreclosure",
                 case_number=case_number,
                 source_listing_id=parcel_number,   # Parcel # is the cross-source join key
@@ -267,7 +267,7 @@ class SheriffSalesScraper(ListingScraper):
     Enable backfill via SHERIFF_BACKFILL=1 env var or backfill=True constructor arg.
     """
 
-    site_name = "sheriff_sales"
+    site_name = "Cuyahoga Sheriff Sales"
 
     def __init__(self, *, backfill: bool = False) -> None:
         env_backfill = os.environ.get("SHERIFF_BACKFILL", "0").strip() == "1"

@@ -125,7 +125,7 @@ class CodeViolationsScraper(SignalScraper):
     include_status_history=True at construction.
     """
 
-    site_name = "code_violations"
+    site_name = "Cleveland Code Violations"
 
     def __init__(
         self,

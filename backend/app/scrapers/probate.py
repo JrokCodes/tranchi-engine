@@ -769,7 +769,7 @@ def _build_listing(
     zipcode = match.property_zip
 
     return RawListing(
-        source_site="probate",
+        source_site="Cuyahoga Probate Court",
         property_address=address,
         property_city=city,
         property_county="Cuyahoga",

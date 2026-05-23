@@ -767,7 +767,7 @@ def _hit_to_raw_listing(hit: dict[str, Any]) -> RawListing:
     addr = hit.get("situs_address", "")
     city = hit.get("property_city")
     return RawListing(
-        source_site="fiscal_officer",
+        source_site="Cuyahoga Fiscal Officer",
         property_address=addr,
         property_city=city,
         property_county="Cuyahoga",
