@@ -403,7 +403,23 @@ async def _upsert_one(
 
     existing_id: UUID | None = None
 
-    if listing.case_number:
+    if listing.case_number and norm_parcel:
+        # Composite key (source, case_number, parcel). Required for probate:
+        # one Estate case legitimately yields MANY property listings (a decedent
+        # who owned multiple parcels). A case-only key would collapse them to one.
+        # Single-parcel sources (sheriff, land_bank) are unaffected — (case,parcel)
+        # is still unique per listing for them.
+        existing_id = await conn.fetchval(
+            """
+            SELECT id FROM tranchi.listings
+            WHERE source_site = $1 AND case_number = $2 AND source_listing_id = $3
+            LIMIT 1
+            """,
+            listing.source_site,
+            listing.case_number,
+            norm_parcel,
+        )
+    elif listing.case_number:
         existing_id = await conn.fetchval(
             """
             SELECT id FROM tranchi.listings
