@@ -13,3 +13,6 @@ alembic==1.13.1
 sqlalchemy==2.0.36
 beautifulsoup4==4.12.3
 lxml==5.3.0
+# Playwright required by fiscal_officer.py for Tax By Year flag enrichment.
+# After pip install, run: playwright install chromium
+playwright>=1.43.0

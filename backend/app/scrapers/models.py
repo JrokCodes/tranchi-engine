@@ -1,10 +1,18 @@
 """
-Shared Pydantic schema for raw listings scraped from deal-sourcing sites.
-All scrapers return list[RawListing] before prefilter + DB upsert.
+Shared Pydantic schemas for scraped data.
+
+RawListing — deal-sourcing scrapers (sheriff, land bank, probate) that write
+             to tranchi.listings. All scrapers return list[RawListing] before
+             prefilter + DB upsert.
+
+RawSignal  — signal scrapers (code violations, fiscal officer flags) that
+             write to tranchi.signals. Signals tag parcels; they are NOT
+             listings. No prefilter applied — every signal row is upserted.
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -31,6 +39,24 @@ class RawListing(BaseModel):
     # from the upstream source. Stored alongside our internal case_number for
     # cross-referencing without normalization loss.
     source_listing_id: str | None = None
+
+
+class RawSignal(BaseModel):
+    """A per-parcel distress signal — lands in tranchi.signals, not tranchi.listings.
+
+    Used by SignalScraper subclasses (code violations, fiscal officer distress flags).
+    parcel_number is the raw value from the upstream source (8-digit for Cleveland
+    violations, DDD-NN-NNN for cross-source joins). confidence is 0.0–1.0.
+
+    payload holds all source-specific fields as JSONB. Keys should be stable
+    across runs so the downstream signal-stack join can filter on payload fields.
+    """
+    parcel_number: str              # raw parcel ID from source
+    signal_type: str                # e.g. 'code_violation'
+    source: str                     # e.g. 'cleveland_open_data'
+    observed_at: datetime           # when the signal was observed (violation file date)
+    confidence: float = 1.0        # 0.0–1.0
+    payload: dict[str, Any] = {}   # JSONB — source-specific fields
 
 
 class ScrapeResult(BaseModel):

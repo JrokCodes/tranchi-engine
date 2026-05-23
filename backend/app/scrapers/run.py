@@ -49,22 +49,30 @@ logger = logging.getLogger("scrapers.run")
 
 import asyncpg  # noqa: E402 — after path setup
 
+from app.scrapers.base import SignalScraper  # noqa: E402
+from app.scrapers.code_violations import (  # noqa: E402
+    CodeViolationsScraper,
+    upsert_signals as _cv_upsert_signals,
+)
 from app.scrapers.db import upsert_listings  # noqa: E402
+from app.scrapers.fiscal_officer import FiscalOfficerScraper  # noqa: E402
+from app.scrapers.landbank import LandBankScraper  # noqa: E402
 from app.scrapers.models import ScrapeResult  # noqa: E402
 from app.scrapers.prefilter import prefilter  # noqa: E402
+from app.scrapers.sheriff import SheriffSalesScraper  # noqa: E402
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Scraper registry — populated as Phase B scrapers are built
+# Scraper registry
 # ─────────────────────────────────────────────────────────────────────────────
-
-# Phase B scrapers will be registered here as they are completed.
-# Format: "cli_key": ScraperClass
+# ListingScraper subclasses → write to tranchi.listings via upsert_listings().
+# SignalScraper subclasses  → write to tranchi.signals  via their upsert_signals().
+# The _run_scraper() dispatcher checks isinstance(scraper, SignalScraper) to route.
 _SCRAPERS: dict[str, type] = {
-    # "land_bank": LandBankScraper,         # Phase B
-    # "code_violations": CodeViolationsScraper,  # Phase B
-    # "sheriff_sales": SheriffSalesScraper, # Phase B
-    # "fiscal_officer": FiscalOfficerScraper, # Phase B
-    # "probate": ProbateScraper,            # Phase B
+    "code_violations": CodeViolationsScraper,
+    "land_bank": LandBankScraper,
+    "sheriff_sales": SheriffSalesScraper,
+    "fiscal_officer": FiscalOfficerScraper,
+    # "probate": ProbateScraper,              # Phase B
 }
 
 
@@ -73,7 +81,12 @@ async def _run_scraper(
     pool: asyncpg.Pool,
     dry_run: bool,
 ) -> ScrapeResult:
-    """Run a single scraper, apply prefilter, upsert to DB. Never raises."""
+    """Run a single scraper. Routes to signal or listing path by scraper type.
+
+    SignalScraper instances: calls fetch_signals() + upsert_signals().
+    ListingScraper instances: calls fetch_and_parse() + prefilter + upsert_listings().
+    Never raises — errors are captured into ScrapeResult.
+    """
     scraper_cls = _SCRAPERS[scraper_key]
     scraper = scraper_cls()
     site_name = scraper.site_name
@@ -81,41 +94,68 @@ async def _run_scraper(
 
     try:
         logger.info("Starting scraper: %s", site_name)
-        raw_listings = await scraper.fetch_and_parse()
-        result.found = len(raw_listings)
-        logger.info("%s: fetched %d raw listings", site_name, result.found)
 
-        filtered_listings = []
-        filtered_out = 0
-        for listing in raw_listings:
-            passes, reason = prefilter(listing)
-            if passes:
-                filtered_listings.append(listing)
-            else:
-                filtered_out += 1
-                logger.debug("%s: filtered %r — %s", site_name, listing.property_address, reason)
+        if isinstance(scraper, SignalScraper):
+            # ── Signal path ────────────────────────────────────────────────────
+            raw_signals = await scraper.fetch_signals()
+            result.found = len(raw_signals)
+            result.passed = len(raw_signals)   # signals are not prefiltered
+            logger.info("%s: fetched %d signals", site_name, result.found)
 
-        result.filtered = filtered_out
-        result.passed = len(filtered_listings)
-        logger.info(
-            "%s: %d passed filters, %d filtered out",
-            site_name, result.passed, filtered_out,
-        )
+            upsert_result = await _cv_upsert_signals(pool, raw_signals, dry_run=dry_run)
+            result.new_inserted = upsert_result.get("inserted", 0)
+            result.updated = upsert_result.get("updated", 0)
+            result.errors = upsert_result.get("errors", 0)
+            # active for signals = total signals in DB for this source
+            if not dry_run:
+                try:
+                    async with pool.acquire() as conn:
+                        result.active = await conn.fetchval(
+                            "SELECT COUNT(*) FROM tranchi.signals WHERE source = $1",
+                            "cleveland_open_data",
+                        ) or 0
+                except Exception:
+                    pass
 
-        upsert_result = await upsert_listings(
-            pool,
-            filtered_listings,
-            site_name,
-            found_raw=result.found,
-            filtered_count=filtered_out,
-            dry_run=dry_run,
-        )
-        result.new_inserted = upsert_result.new_inserted
-        result.updated = upsert_result.updated
-        result.active = upsert_result.active
-        result.new_today = upsert_result.new_today
-        result.errors = upsert_result.errors
-        result.error_message = upsert_result.error_message
+        else:
+            # ── Listing path ───────────────────────────────────────────────────
+            raw_listings = await scraper.fetch_and_parse()
+            result.found = len(raw_listings)
+            logger.info("%s: fetched %d raw listings", site_name, result.found)
+
+            filtered_listings = []
+            filtered_out = 0
+            for listing in raw_listings:
+                passes, reason = prefilter(listing)
+                if passes:
+                    filtered_listings.append(listing)
+                else:
+                    filtered_out += 1
+                    logger.debug(
+                        "%s: filtered %r — %s", site_name, listing.property_address, reason
+                    )
+
+            result.filtered = filtered_out
+            result.passed = len(filtered_listings)
+            logger.info(
+                "%s: %d passed filters, %d filtered out",
+                site_name, result.passed, filtered_out,
+            )
+
+            upsert_result = await upsert_listings(
+                pool,
+                filtered_listings,
+                site_name,
+                found_raw=result.found,
+                filtered_count=filtered_out,
+                dry_run=dry_run,
+            )
+            result.new_inserted = upsert_result.new_inserted
+            result.updated = upsert_result.updated
+            result.active = upsert_result.active
+            result.new_today = upsert_result.new_today
+            result.errors = upsert_result.errors
+            result.error_message = upsert_result.error_message
 
     except Exception as exc:
         logger.exception("Unhandled error in scraper %r: %s", site_name, exc)
