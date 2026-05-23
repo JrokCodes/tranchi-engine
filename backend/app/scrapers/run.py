@@ -1,0 +1,359 @@
+"""
+Tranchi Engine — Scraper CLI entrypoint.
+
+Usage:
+    python -m app.scrapers.run                     # run all scrapers
+    python -m app.scrapers.run --site land_bank    # run one scraper
+    python -m app.scrapers.run --dry-run           # parse only, no DB writes
+    python -m app.scrapers.run --dry-run --site sheriff_sales
+
+Exit code:
+    0 — all scrapers succeeded (or no errors)
+    1 — at least one scraper had errors
+
+Dedup invariant: _dedup_cross_source_listings collapses by normalized_address
+ALONE across the live pool (status IN ('active','not_listed')). Same source +
+same address counts as a duplicate. NULL sale_date does not split clusters.
+Canonical row = most recent non-NULL sale_date, tiebroken by oldest first_seen_at.
+Expired/cancelled rows are excluded so re-listed properties re-canonicalize cleanly.
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import logging
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Bootstrap: allow running as `python -m app.scrapers.run` from backend/
+# ─────────────────────────────────────────────────────────────────────────────
+
+_here = Path(__file__).resolve().parent        # backend/app/scrapers/
+_backend = _here.parent.parent                 # backend/
+if str(_backend) not in sys.path:
+    sys.path.insert(0, str(_backend))
+
+_env_file = _backend / ".env"
+if _env_file.exists():
+    from dotenv import load_dotenv
+    load_dotenv(_env_file)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger("scrapers.run")
+
+import asyncpg  # noqa: E402 — after path setup
+
+from app.scrapers.db import upsert_listings  # noqa: E402
+from app.scrapers.models import ScrapeResult  # noqa: E402
+from app.scrapers.prefilter import prefilter  # noqa: E402
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Scraper registry — populated as Phase B scrapers are built
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Phase B scrapers will be registered here as they are completed.
+# Format: "cli_key": ScraperClass
+_SCRAPERS: dict[str, type] = {
+    # "land_bank": LandBankScraper,         # Phase B
+    # "code_violations": CodeViolationsScraper,  # Phase B
+    # "sheriff_sales": SheriffSalesScraper, # Phase B
+    # "fiscal_officer": FiscalOfficerScraper, # Phase B
+    # "probate": ProbateScraper,            # Phase B
+}
+
+
+async def _run_scraper(
+    scraper_key: str,
+    pool: asyncpg.Pool,
+    dry_run: bool,
+) -> ScrapeResult:
+    """Run a single scraper, apply prefilter, upsert to DB. Never raises."""
+    scraper_cls = _SCRAPERS[scraper_key]
+    scraper = scraper_cls()
+    site_name = scraper.site_name
+    result = ScrapeResult(source_site=site_name)
+
+    try:
+        logger.info("Starting scraper: %s", site_name)
+        raw_listings = await scraper.fetch_and_parse()
+        result.found = len(raw_listings)
+        logger.info("%s: fetched %d raw listings", site_name, result.found)
+
+        filtered_listings = []
+        filtered_out = 0
+        for listing in raw_listings:
+            passes, reason = prefilter(listing)
+            if passes:
+                filtered_listings.append(listing)
+            else:
+                filtered_out += 1
+                logger.debug("%s: filtered %r — %s", site_name, listing.property_address, reason)
+
+        result.filtered = filtered_out
+        result.passed = len(filtered_listings)
+        logger.info(
+            "%s: %d passed filters, %d filtered out",
+            site_name, result.passed, filtered_out,
+        )
+
+        upsert_result = await upsert_listings(
+            pool,
+            filtered_listings,
+            site_name,
+            found_raw=result.found,
+            filtered_count=filtered_out,
+            dry_run=dry_run,
+        )
+        result.new_inserted = upsert_result.new_inserted
+        result.updated = upsert_result.updated
+        result.active = upsert_result.active
+        result.new_today = upsert_result.new_today
+        result.errors = upsert_result.errors
+        result.error_message = upsert_result.error_message
+
+    except Exception as exc:
+        logger.exception("Unhandled error in scraper %r: %s", site_name, exc)
+        result.errors += 1
+        result.error_message = str(exc)
+
+    return result
+
+
+def _print_results_table(results: list[ScrapeResult]) -> None:
+    """Print a formatted results table matching the Sources dashboard shape."""
+    print()
+    header = f"{'SITE':<25} {'FOUND':>6} {'PASSED':>7} {'ACTIVE':>7} {'FILT':>6} {'DUPES':>6} {'NEW':>5} {'ERR':>5}"
+    print(header)
+    print("-" * len(header))
+    for r in results:
+        print(
+            f"{r.source_site:<25} "
+            f"{r.found:>6} "
+            f"{r.passed:>7} "
+            f"{r.active:>7} "
+            f"{r.filtered:>6} "
+            f"{r.dupes:>6} "
+            f"{r.new_today:>5} "
+            f"{r.errors:>5}"
+        )
+    print("-" * len(header))
+
+    print(
+        f"{'TOTAL':<25} "
+        f"{sum(r.found for r in results):>6} "
+        f"{sum(r.passed for r in results):>7} "
+        f"{sum(r.active for r in results):>7} "
+        f"{sum(r.filtered for r in results):>6} "
+        f"{sum(r.dupes for r in results):>6} "
+        f"{sum(r.new_today for r in results):>5} "
+        f"{sum(r.errors for r in results):>5}"
+    )
+    print()
+
+    for r in results:
+        if r.error_message:
+            print(f"  ERROR [{r.source_site}]: {r.error_message}")
+    print()
+
+
+async def _mark_stale_listings(
+    pool: asyncpg.Pool,
+    results: list[ScrapeResult],
+    run_start: datetime,
+) -> int:
+    """Mark listings as 'not_listed' if not refreshed in this scrape cycle.
+
+    Only marks stale for sources where the scraper succeeded and found > 0.
+    """
+    successful_sources = [
+        r.source_site for r in results
+        if r.found > 0 and r.errors == 0
+    ]
+    if not successful_sources:
+        logger.info("Stale detection: no successful scrapers, skipping.")
+        return 0
+
+    try:
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                UPDATE tranchi.listings
+                SET status = 'not_listed'
+                WHERE status NOT IN ('not_listed', 'cancelled', 'sold', 'expired')
+                  AND last_seen_at < $1
+                  AND source_site = ANY($2::text[])
+                """,
+                run_start,
+                successful_sources,
+            )
+            count = int(result.split()[-1]) if result else 0
+            if count > 0:
+                logger.info("Stale detection: marked %d listings as not_listed", count)
+            return count
+    except Exception as exc:
+        logger.warning("Stale detection failed: %s", exc)
+        return 0
+
+
+async def _dedup_cross_source_listings(pool: asyncpg.Pool) -> int:
+    """Collapse live listings sharing a normalized_address into one canonical row.
+
+    Live pool = status IN ('active','not_listed'). Canonical preference:
+    rows with a real sale_date over NULL, then most-recent sale_date,
+    then oldest first_seen_at. All other live rows in the cluster get
+    duplicate_of set to the canonical id. Returns count of flagged dupes.
+    """
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                WITH clusters AS (
+                    SELECT
+                        id,
+                        normalized_address,
+                        FIRST_VALUE(id) OVER (
+                            PARTITION BY normalized_address
+                            ORDER BY (sale_date IS NULL), sale_date DESC NULLS LAST, first_seen_at, id
+                        ) AS canonical_id
+                    FROM tranchi.listings
+                    WHERE status IN ('active', 'not_listed')
+                      AND normalized_address IS NOT NULL
+                )
+                UPDATE tranchi.listings l
+                SET duplicate_of = CASE
+                        WHEN c.id = c.canonical_id THEN NULL
+                        ELSE c.canonical_id
+                    END
+                FROM clusters c
+                WHERE l.id = c.id
+                  AND l.duplicate_of IS DISTINCT FROM CASE
+                        WHEN c.id = c.canonical_id THEN NULL
+                        ELSE c.canonical_id
+                    END
+                """
+            )
+            marked = await conn.fetchval(
+                """
+                SELECT COUNT(*)
+                FROM tranchi.listings
+                WHERE status IN ('active', 'not_listed')
+                  AND duplicate_of IS NOT NULL
+                """
+            )
+            logger.info("Dedup: %d live listings currently flagged as duplicates", marked)
+            return marked or 0
+    except Exception as exc:
+        logger.warning("Dedup pass failed: %s", exc)
+        return 0
+
+
+async def _mark_expired_listings(pool: asyncpg.Pool) -> int:
+    """Mark listings with past sale dates as 'expired'."""
+    try:
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                UPDATE tranchi.listings
+                SET status = 'expired'
+                WHERE sale_date < CURRENT_DATE
+                  AND status IN ('active', 'not_listed')
+                """,
+            )
+            count = int(result.split()[-1]) if result else 0
+            if count > 0:
+                logger.info("Expired detection: marked %d listings as expired", count)
+            return count
+    except Exception as exc:
+        logger.warning("Expired detection failed: %s", exc)
+        return 0
+
+
+async def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Tranchi Engine — run deal-sourcing scrapers",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    parser.add_argument(
+        "--site",
+        choices=list(_SCRAPERS.keys()) if _SCRAPERS else [],
+        default=None,
+        help="Run only this scraper (default: run all)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Parse and filter listings but skip DB writes",
+    )
+    args = parser.parse_args()
+
+    if not _SCRAPERS:
+        logger.warning("No scrapers registered yet. Phase B scrapers not yet built.")
+        return 0
+
+    database_url = os.environ.get("DATABASE_URL", "")
+    if not database_url:
+        try:
+            from app.config import settings
+            database_url = settings.DATABASE_URL
+        except Exception:
+            pass
+
+    if not database_url:
+        logger.error(
+            "DATABASE_URL is not set. "
+            "Create a .env file in backend/ with DATABASE_URL=..."
+        )
+        return 1
+
+    logger.info("Connecting to database...")
+    try:
+        pool = await asyncpg.create_pool(database_url, min_size=1, max_size=5)
+    except Exception as exc:
+        logger.error("Failed to connect to database: %s", exc)
+        return 1
+
+    try:
+        run_start = datetime.now(tz=timezone.utc)
+
+        if args.site:
+            scraper_keys = [args.site]
+        else:
+            scraper_keys = list(_SCRAPERS.keys())
+
+        if args.dry_run:
+            logger.info("DRY RUN mode — no data will be written to the database.")
+
+        results: list[ScrapeResult] = []
+        for key in scraper_keys:
+            result = await _run_scraper(key, pool, dry_run=args.dry_run)
+            results.append(result)
+
+        _print_results_table(results)
+
+        if not args.dry_run and not args.site:
+            delisted = await _mark_stale_listings(pool, results, run_start)
+            expired = await _mark_expired_listings(pool)
+            dupes = await _dedup_cross_source_listings(pool)
+            logger.info(
+                "Post-run: %d delisted, %d expired, %d dupes",
+                delisted, expired, dupes,
+            )
+
+        total_errors = sum(r.errors for r in results)
+        return 1 if total_errors > 0 else 0
+
+    finally:
+        await pool.close()
+        logger.info("Database pool closed.")
+
+
+if __name__ == "__main__":
+    exit_code = asyncio.run(main())
+    sys.exit(exit_code)

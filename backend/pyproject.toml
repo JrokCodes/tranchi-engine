@@ -1,0 +1,8 @@
+[project]
+name = "tranchi-engine"
+version = "0.1.0"
+description = "Cleveland real-estate deal scrapers for Tranchi.ai"
+requires-python = ">=3.11"
+
+[tool.ruff]
+line-length = 100
