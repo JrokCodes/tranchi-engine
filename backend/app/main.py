@@ -1,6 +1,6 @@
 """
 Tranchi Engine — FastAPI application entry point
-Port: 8011 (per IntelleQ EC2 port map — Gotham is 8010)
+Port: 8012 (per IntelleQ EC2 port map — Gotham is 8010, intelleq-chat is 8011)
 Security:
   - CORS: explicit origins only, no wildcards
   - Swagger/ReDoc disabled when DEBUG=false
@@ -23,6 +23,7 @@ from slowapi.util import get_remote_address
 
 from app.config import settings
 from app.database import close_pool, get_pool
+from app.routers import listings, sources
 
 logging.basicConfig(
     level=logging.DEBUG if settings.DEBUG else logging.INFO,
@@ -34,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    logger.info("Tranchi Engine starting up on port 8011")
+    logger.info("Tranchi Engine starting up on port 8012")
     await get_pool()
     yield
     await close_pool()
@@ -83,9 +84,8 @@ async def value_error_handler(request: Request, exc: ValueError) -> JSONResponse
     )
 
 
-# Routers will be registered here as Phase C builds them.
-# app.include_router(listings.router, prefix="/api/v1/listings", tags=["listings"])
-# app.include_router(sources.router,  prefix="/api/v1/sources",  tags=["sources"])
+app.include_router(listings.router, prefix="/api/v1/listings", tags=["listings"])
+app.include_router(sources.router,  prefix="/api/v1/sources",  tags=["sources"])
 
 
 @app.get("/health", tags=["health"])
