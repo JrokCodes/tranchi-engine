@@ -55,7 +55,10 @@ from app.scrapers.code_violations import (  # noqa: E402
     upsert_signals as _cv_upsert_signals,
 )
 from app.scrapers.db import upsert_listings  # noqa: E402
-from app.scrapers.fiscal_officer import FiscalOfficerScraper  # noqa: E402
+from app.scrapers.fiscal_officer import (  # noqa: E402
+    FiscalOfficerScraper,
+    upsert_parcels as _fo_upsert_parcels,
+)
 from app.scrapers.landbank import LandBankScraper  # noqa: E402
 from app.scrapers.models import ScrapeResult  # noqa: E402
 from app.scrapers.prefilter import prefilter  # noqa: E402
@@ -110,9 +113,11 @@ async def _run_scraper(
     pool: asyncpg.Pool,
     dry_run: bool,
 ) -> ScrapeResult:
-    """Run a single scraper. Routes to signal or listing path by scraper type.
+    """Run a single scraper. Routes to registry, signal, or listing path.
 
-    SignalScraper instances: calls fetch_signals() + upsert_signals().
+    fiscal_officer (registry path): calls fetch_parcels() + upsert_parcels().
+        Populates tranchi.parcels only — does NOT write tranchi.listings.
+    SignalScraper instances: calls fetch_signals() + upsert_signals() + scrape_runs row.
     ListingScraper instances: calls fetch_and_parse() + prefilter + upsert_listings().
     Never raises — errors are captured into ScrapeResult.
     """
@@ -140,6 +145,11 @@ async def _run_scraper(
         else:
             logger.info("%s: no prior successful run — full backfill", site_name_for_query)
         scraper = scraper_cls(last_run_date=last_run_date)
+    elif scraper_key == "fiscal_officer":
+        # Registry sweep: enrich_detail=False (light — parcel# + owner + address
+        # only, ~26 page fetches). enrich_detail=True does a per-parcel detail
+        # POST for all ~20K parcels which takes hours.
+        scraper = scraper_cls(enrich_detail=False)
     elif scraper_key == "probate":
         # Probate manages its own cursor (tranchi.probate_cursor) and signal
         # writes internally, so it needs the pool + dry_run flag at construction.
@@ -153,8 +163,63 @@ async def _run_scraper(
     try:
         logger.info("Starting scraper: %s", site_name)
 
-        if isinstance(scraper, SignalScraper):
+        if scraper_key == "fiscal_officer":
+            # ── Registry path ──────────────────────────────────────────────────
+            # fiscal_officer is the parcel identity spine, not a deal-listing feed.
+            # We populate tranchi.parcels only; tranchi.listings is never touched.
+            # upsert_signals_from_parcels is SKIPPED here: enrich_detail=False means
+            # tax-distress flags (flag_foreclosure, flag_cert_pending, etc.) are not
+            # fetched. Distress-signal enrichment belongs in a separate targeted job
+            # that runs with enrich_detail=True on a filtered subset of parcels.
+            started_at = datetime.now(tz=timezone.utc)
+            hits = await scraper.fetch_parcels()
+            result.found = len(hits)
+            result.passed = len(hits)   # registry: every hit is passed through
+            logger.info("%s: fetched %d parcels from registry sweep", site_name, result.found)
+
+            upsert_counts = await _fo_upsert_parcels(pool, hits, dry_run=dry_run)
+            result.new_inserted = upsert_counts.get("inserted", 0)
+            result.updated = upsert_counts.get("updated", 0)
+            result.errors = upsert_counts.get("errors", 0)
+
+            if not dry_run:
+                try:
+                    async with pool.acquire() as conn:
+                        result.active = await conn.fetchval(
+                            "SELECT COUNT(*) FROM tranchi.parcels"
+                        ) or 0
+                except Exception:
+                    pass
+
+            # Write scrape_runs row so Sources dashboard shows fiscal_officer.
+            if not dry_run:
+                completed_at = datetime.now(tz=timezone.utc)
+                final_status = "error" if result.errors > 0 and result.new_inserted == 0 else "success"
+                try:
+                    async with pool.acquire() as conn:
+                        await conn.execute(
+                            """
+                            INSERT INTO tranchi.scrape_runs
+                                (source_site, started_at, completed_at, status,
+                                 found, passed, active, filtered, new_today,
+                                 error_message)
+                            VALUES ($1, $2, $3, $4, $5, $6, $7, 0, 0, $8)
+                            """,
+                            site_name,
+                            started_at,
+                            completed_at,
+                            final_status,
+                            result.found,
+                            result.passed,
+                            result.active,
+                            result.error_message,
+                        )
+                except Exception as exc:
+                    logger.error("Failed to write scrape_run for %r: %s", site_name, exc)
+
+        elif isinstance(scraper, SignalScraper):
             # ── Signal path ────────────────────────────────────────────────────
+            started_at = datetime.now(tz=timezone.utc)
             raw_signals = await scraper.fetch_signals()
             result.found = len(raw_signals)
             result.passed = len(raw_signals)   # signals are not prefiltered
@@ -174,6 +239,32 @@ async def _run_scraper(
                         ) or 0
                 except Exception:
                     pass
+
+            # Write scrape_runs row so Sources dashboard shows code_violations.
+            if not dry_run:
+                completed_at = datetime.now(tz=timezone.utc)
+                final_status = "error" if result.errors > 0 and result.new_inserted == 0 else "success"
+                try:
+                    async with pool.acquire() as conn:
+                        await conn.execute(
+                            """
+                            INSERT INTO tranchi.scrape_runs
+                                (source_site, started_at, completed_at, status,
+                                 found, passed, active, filtered, new_today,
+                                 error_message)
+                            VALUES ($1, $2, $3, $4, $5, $6, $7, 0, 0, $8)
+                            """,
+                            site_name,
+                            started_at,
+                            completed_at,
+                            final_status,
+                            result.found,
+                            result.passed,
+                            result.active,
+                            result.error_message,
+                        )
+                except Exception as exc:
+                    logger.error("Failed to write scrape_run for %r: %s", site_name, exc)
 
         else:
             # ── Listing path ───────────────────────────────────────────────────

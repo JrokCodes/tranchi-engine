@@ -680,10 +680,16 @@ class FiscalOfficerScraper(ListingScraper):
     """
     Bulk parcel pull for Cuyahoga County.
 
-    fetch_and_parse() runs an A–Z owner-name sweep, collecting all parcels
-    visible in the MyPlace search results. Returns each parcel as a RawListing
-    (writing to tranchi.listings with source='fiscal_officer') AND upserts into
-    tranchi.parcels via the companion upsert_parcels() helper.
+    Two entry points for the sweep:
+
+    fetch_parcels() — returns raw hit dicts (list[dict]). Used by the registry
+        path in run.py: feeds directly into upsert_parcels() to populate
+        tranchi.parcels without touching tranchi.listings.
+
+    fetch_and_parse() — convenience wrapper around fetch_parcels() that converts
+        hits to RawListing objects. Kept for ad-hoc use; the orchestrator does NOT
+        call this for fiscal_officer (it would flood tranchi.listings with ~20K
+        registry rows).
 
     The bulk path does NOT enrich Tax By Year flags (too slow at scale). A
     separate enrichment pass should run on parcels where delinquent_flag is True
@@ -708,20 +714,25 @@ class FiscalOfficerScraper(ListingScraper):
                            incremental or partial runs.
             enrich_detail: If True, POST to /MainPage/PropertyData for each parcel
                            to get General Information fields. Slower but richer.
+                           Pass False for the registry sweep (light: parcel# +
+                           owner + address only, ~26 page fetches, fast).
             city_code: MyPlace city code (default: "99" = entire county).
         """
         self.sweep_letters = sweep_letters or list(_ALPHABET)
         self.enrich_detail = enrich_detail
         self.city_code = city_code
 
-    async def fetch_and_parse(self) -> list[RawListing]:
+    async def fetch_parcels(self) -> list[dict[str, Any]]:
         """
-        Sweep owner names A–Z across the entire county, parse hit lists,
-        optionally enrich with detail-page data, and return as RawListings.
+        Sweep owner names A–Z across the entire county and return raw hit dicts.
 
-        Returns RawListing objects (for tranchi.listings). The companion
-        upsert_parcels() function should be called separately to write
-        to tranchi.parcels. This dual write is handled by run.py.
+        This is the primary entry point for the registry path in run.py. Returning
+        raw dicts (not RawListings) lets the caller feed them directly into
+        upsert_parcels() without a lossy round-trip through RawListing fields.
+
+        With enrich_detail=False (registry mode): fetches ~26 search pages only,
+        returning parcel_number + owner_name + situs_address. Fast (~minutes).
+        With enrich_detail=True: adds a per-parcel detail POST (~hours at scale).
         """
         all_hits: list[dict[str, Any]] = []
         seen_parcels: set[str] = set()
@@ -759,7 +770,18 @@ class FiscalOfficerScraper(ListingScraper):
                 await asyncio.sleep(_jitter(*_SEARCH_DELAY))
 
         logger.info("Fiscal Officer sweep complete: %d unique parcels", len(all_hits))
-        return [_hit_to_raw_listing(h) for h in all_hits]
+        return all_hits
+
+    async def fetch_and_parse(self) -> list[RawListing]:
+        """
+        Sweep owner names A–Z and return results as RawListing objects.
+
+        Thin wrapper around fetch_parcels() for ad-hoc use. run.py does NOT call
+        this for fiscal_officer — it calls fetch_parcels() + upsert_parcels()
+        directly to avoid flooding tranchi.listings with registry rows.
+        """
+        hits = await self.fetch_parcels()
+        return [_hit_to_raw_listing(h) for h in hits]
 
 
 def _hit_to_raw_listing(hit: dict[str, Any]) -> RawListing:
