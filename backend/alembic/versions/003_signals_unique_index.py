@@ -26,9 +26,15 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    # NOTE: (observed_at::date) is NOT immutable for a timestamptz column (the
+    # cast depends on session TimeZone), and Postgres rejects non-IMMUTABLE
+    # expressions in an index. (observed_at AT TIME ZONE 'UTC')::date IS
+    # immutable — AT TIME ZONE on a timestamptz yields a plain timestamp
+    # deterministically, and timestamp::date is immutable. Any ON CONFLICT
+    # naming this index must use the identical expression.
     op.execute("""
         CREATE UNIQUE INDEX IF NOT EXISTS uq_tranchi_signals_natural_key
-            ON tranchi.signals (parcel_number, signal_type, source, (observed_at::date))
+            ON tranchi.signals (parcel_number, signal_type, source, ((observed_at AT TIME ZONE 'UTC')::date))
     """)
 
 

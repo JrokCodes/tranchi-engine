@@ -398,7 +398,7 @@ async def upsert_signals(
                     INSERT INTO tranchi.signals
                         (parcel_number, signal_type, source, observed_at, confidence, payload)
                     VALUES ($1, $2, $3, $4, $5, $6::jsonb)
-                    ON CONFLICT (parcel_number, signal_type, source, (observed_at::date))
+                    ON CONFLICT (parcel_number, signal_type, source, ((observed_at AT TIME ZONE 'UTC')::date))
                     DO UPDATE SET
                         last_seen_at = NOW(),
                         confidence   = EXCLUDED.confidence,
