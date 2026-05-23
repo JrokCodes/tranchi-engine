@@ -1021,6 +1021,109 @@ async def search_by_owner(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# On-demand lookup by address — used by probate.py (dual-path join)
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def search_by_address(
+    address: str,
+    *,
+    enrich_detail: bool = True,
+    city_code: str = _ENTIRE_COUNTY_CODE,
+) -> list[ParcelMatch]:
+    """
+    On-demand address search on MyPlace. Called by probate.py as the
+    high-confidence path when a decedent_address is known.
+
+    Mirrors search_by_owner but uses Address mode instead of Owner mode.
+    An exact address match gets confidence=0.95 and ambiguous=False.
+    When multiple parcels are returned (e.g. a condo complex sharing an
+    address root), all are returned with ambiguous=True and confidence=0.90.
+
+    Args:
+        address: Situs address to search (e.g. "6859 Hidden Lake Trail").
+        enrich_detail: If True, POST to PropertyData for each hit to get
+                       land use, school district, neighborhood, etc.
+        city_code: Restrict to a specific municipality. Default: entire county.
+
+    Returns:
+        List of ParcelMatch objects sorted by confidence descending.
+        Returns empty list when address is blank or no results found.
+    """
+    address = address.strip()
+    if not address:
+        return []
+
+    # Use the street-and-number portion as the search term (strip city/state/zip
+    # suffix if the caller passed a full address string from CaseParties).
+    # MyPlace Address search matches on the street portion, not the full string.
+    search_term = address.split(",")[0].strip()
+
+    logger.info(
+        "search_by_address: address=%r, search_term=%r, city=%s",
+        address, search_term, city_code,
+    )
+
+    headers = _default_headers()
+    all_hits: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=_TIMEOUT) as client:
+        html = await _fetch_search_page(client, search_term, city_code, mode=_MODE_ADDRESS)
+        if html is None:
+            logger.error("search_by_address: search page fetch failed for %r", search_term)
+            return []
+
+        raw_hits = _parse_hit_list(html)
+        logger.info("search_by_address: %d raw hits for address=%r", len(raw_hits), search_term)
+
+        for hit in raw_hits:
+            pn = hit["parcel_number"]
+            if pn in seen:
+                continue
+            seen.add(pn)
+
+            if enrich_detail and len(all_hits) < _MAX_DETAIL_ENRICH:
+                detail = await _fetch_property_data(client, hit, search_term, city_code)
+                hit.update({k: v for k, v in detail.items() if not k.startswith("_")})
+                await asyncio.sleep(_jitter(*_DETAIL_DELAY))
+
+            all_hits.append(hit)
+
+    if not all_hits:
+        return []
+
+    # Confidence assignment: single result = exact address match (0.95, not ambiguous).
+    # Multiple results = address matched multiple parcels (0.90, ambiguous).
+    is_ambiguous = len(all_hits) > 1
+    confidence = 0.90 if is_ambiguous else 0.95
+
+    matches: list[ParcelMatch] = []
+    for hit in all_hits:
+        match = ParcelMatch(
+            parcel_number=hit["parcel_number"],
+            owner_name=hit["owner_name"],
+            situs_address=hit.get("situs_address", ""),
+            property_city=hit.get("property_city"),
+            property_zip=hit.get("property_zip"),
+            market_value=hit.get("current_market_value"),
+            tax_balance=hit.get("tax_balance_due"),
+            confidence=confidence,
+            ambiguous=is_ambiguous,
+            full_record={k: v for k, v in hit.items() if not k.startswith("_")},
+        )
+        matches.append(match)
+
+    matches.sort(key=lambda m: m.confidence, reverse=True)
+    logger.info(
+        "search_by_address: returning %d matches (confidence=%.2f, ambiguous=%s)",
+        len(matches),
+        matches[0].confidence if matches else 0.0,
+        is_ambiguous,
+    )
+    return matches
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Signal upsert helper (for tax flags → tranchi.signals)
 # ─────────────────────────────────────────────────────────────────────────────
 

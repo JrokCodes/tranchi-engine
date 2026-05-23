@@ -219,6 +219,37 @@ def normalize_address(addr: str) -> str:
     return ' '.join(tokens)
 
 
+def normalize_parcel_number(raw: str | None) -> str | None:
+    """Normalize a Cuyahoga parcel number to the display format DDD-NN-NNN.
+
+    Cuyahoga uses two formats in active use:
+      - Display: '110-19-068' (Sheriff, Fiscal Officer, Land Bank)
+      - Compact: '11019068'   (Cleveland Open Data / code violations)
+
+    Both refer to the same parcel. This function normalizes both to display
+    format so cross-source joins on parcel_number work without format mismatches.
+
+    Logic:
+      - Strip all non-digit characters.
+      - If exactly 8 digits: format as DDD-NN-NNN (3-2-3 split).
+      - If already hyphenated and matches DDD-NN-NNN: return as-is (idempotent).
+      - Otherwise: return the cleaned input unchanged (don't crash on edge cases).
+    """
+    if raw is None:
+        return None
+    stripped = raw.strip()
+    if not stripped:
+        return None
+    # Already in display format
+    if re.match(r"^\d{3}-\d{2}-\d{3}$", stripped):
+        return stripped
+    digits = re.sub(r"\D", "", stripped)
+    if len(digits) == 8:
+        return f"{digits[:3]}-{digits[3:5]}-{digits[5:]}"
+    # Can't normalize — return cleaned input unchanged
+    return stripped
+
+
 def _utcnow() -> datetime:
     return datetime.now(tz=timezone.utc)
 
@@ -368,6 +399,7 @@ async def _upsert_one(
     norm_addr = normalize_address(canon_addr) if canon_addr else None
     canon_county = canonical_county(listing.property_county)
     canon_city = canonical_city(listing.property_city)
+    norm_parcel = normalize_parcel_number(listing.source_listing_id)
 
     existing_id: UUID | None = None
 
@@ -423,7 +455,7 @@ async def _upsert_one(
             listing.property_zip,
             listing.sale_date,
             listing.signal_type,
-            listing.source_listing_id,
+            norm_parcel,
             existing_id,
         )
         return existing_id, False
@@ -460,7 +492,7 @@ async def _upsert_one(
         listing.status,
         norm_addr,
         listing.signal_type,
-        listing.source_listing_id,
+        norm_parcel,
     )
     return new_id, True
 

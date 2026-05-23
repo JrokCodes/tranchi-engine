@@ -76,6 +76,34 @@ _SCRAPERS: dict[str, type] = {
 }
 
 
+async def _get_last_successful_run(pool: asyncpg.Pool, source_site: str) -> str | None:
+    """Query tranchi.scrape_runs for the most recent successful started_at for source_site.
+
+    Returns ISO date string (YYYY-MM-DD) of the last success, or None if no prior
+    successful run exists (first run → scraper does full backfill).
+    """
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchval(
+                """
+                SELECT started_at
+                FROM tranchi.scrape_runs
+                WHERE source_site = $1
+                  AND status = 'success'
+                ORDER BY started_at DESC
+                LIMIT 1
+                """,
+                source_site,
+            )
+        if row is None:
+            return None
+        # row is a datetime (asyncpg returns timestamptz as aware datetime)
+        return row.date().isoformat()
+    except Exception as exc:
+        logger.warning("Failed to fetch last successful run for %r: %s", source_site, exc)
+        return None
+
+
 async def _run_scraper(
     scraper_key: str,
     pool: asyncpg.Pool,
@@ -88,7 +116,31 @@ async def _run_scraper(
     Never raises — errors are captured into ScrapeResult.
     """
     scraper_cls = _SCRAPERS[scraper_key]
-    scraper = scraper_cls()
+
+    # ── Delta-pull: resolve last_run_date for scrapers that accept it ─────────
+    # Scrapers that support incremental pulls take a last_run_date constructor arg
+    # (ISO date string or None for full backfill).
+    #   code_violations: delta via FILE_DATE >= <last_run_date - 1 day>
+    #   fiscal_officer:  does not accept last_run_date (full A-Z sweep each run)
+    # Scrapers that manage their own state (probate cursor) or do full pulls
+    # by design (landbank, sheriff) are constructed with no arguments as before.
+    _DELTA_PULL_SCRAPERS = {"code_violations"}
+    if scraper_key in _DELTA_PULL_SCRAPERS:
+        # Peek at the site_name by instantiating briefly — cheaper than a separate
+        # registry. Alternatively derive site_name from a mock instance.
+        _probe = scraper_cls.__new__(scraper_cls)
+        site_name_for_query = getattr(_probe, "site_name", scraper_key)
+        last_run_date = await _get_last_successful_run(pool, site_name_for_query)
+        if last_run_date:
+            logger.info(
+                "%s: incremental pull from last successful run %s",
+                site_name_for_query, last_run_date,
+            )
+        else:
+            logger.info("%s: no prior successful run — full backfill", site_name_for_query)
+        scraper = scraper_cls(last_run_date=last_run_date)
+    else:
+        scraper = scraper_cls()
     site_name = scraper.site_name
     result = ScrapeResult(source_site=site_name)
 

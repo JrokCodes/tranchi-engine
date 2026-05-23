@@ -52,6 +52,7 @@ import asyncpg
 from app.scrapers._time import today_et, n_days_ago_et
 from app.scrapers.arcgis_client import count_features, query_features
 from app.scrapers.base import SignalScraper
+from app.scrapers.db import normalize_parcel_number
 from app.scrapers.models import RawSignal
 
 logger = logging.getLogger(__name__)
@@ -374,6 +375,10 @@ async def upsert_signals(
     async with pool.acquire() as conn:
         for sig in signals:
             try:
+                # Normalize to display format (DDD-NN-NNN) so cross-source parcel
+                # joins work. Cleveland Open Data uses compact 8-digit format.
+                parcel_number = normalize_parcel_number(sig.parcel_number) or sig.parcel_number
+
                 # Stub-upsert into tranchi.parcels to satisfy FK.
                 # ON CONFLICT DO NOTHING: if fiscal_officer has already populated
                 # the full parcel record, we leave it untouched.
@@ -383,11 +388,11 @@ async def upsert_signals(
                     VALUES ($1)
                     ON CONFLICT (parcel_number) DO NOTHING
                     """,
-                    sig.parcel_number,
+                    parcel_number,
                 )
 
                 # Upsert signal using the natural idempotency key.
-                # Requires unique index uq_tranchi_signals_natural_key (see docstring).
+                # Requires unique index uq_tranchi_signals_natural_key (migration 003).
                 result = await conn.fetchrow(
                     """
                     INSERT INTO tranchi.signals
@@ -400,7 +405,7 @@ async def upsert_signals(
                         payload      = EXCLUDED.payload
                     RETURNING (xmax = 0) AS is_insert
                     """,
-                    sig.parcel_number,
+                    parcel_number,
                     sig.signal_type,
                     sig.source,
                     sig.observed_at,

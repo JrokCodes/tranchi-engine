@@ -24,6 +24,26 @@ ToS POSTURE (mandatory — this is the only scraper with explicit anti-mining la
 - Delta-only via cursor — never bulk-pull historical records
 - No self-identification in headers
 
+DUAL-PATH PARCEL RESOLUTION (address_anchor + name_match):
+For each Estate case, parcel resolution uses TWO paths in parallel:
+
+  Path A — address_anchor (high confidence, 0.95+):
+    If decedent_address is present on the CaseParties page, call
+    fiscal_officer.search_by_address(decedent_address). This finds the
+    "home" parcel directly, even when the owner-name search misses it
+    (married names, typos, abbreviated names in MyPlace). Tagged in listing
+    metadata as join_method="address_anchor".
+
+  Path B — name_match (fuzzy, 0.75+):
+    Always call fiscal_officer.search_by_owner(decedent_name). Catches
+    additional owned parcels (investment properties, lots) that the address
+    path would miss. Tagged join_method="name_match".
+
+Deduplication: if the same parcel_number appears in both paths, keep the
+address_anchor version (higher confidence). This is the main hit-rate
+improvement: previously, if name_match returned zero, we emitted no listing.
+Now, a successful address_anchor still emits the home parcel.
+
 DATA FLOW PER ESTATE CASE:
 1. GET CaseSummary.aspx?q=<b64(id)>
    → parse: case_number, case_title, filing_date, case_status, judge
@@ -32,10 +52,11 @@ DATA FLOW PER ESTATE CASE:
    → parse: decedent name, DOD (from "(DOD: MM/DD/YYYY)" suffix), decedent address
    → parse: executor/administrator name (role EX or AD)
    → parse: attorney name (role AT)
-3. call fiscal_officer.search_by_owner(decedent_name)
-   → for each ParcelMatch above confidence threshold:
-       emit one RawListing per matched parcel
-4. Also write one tranchi.signals row per matched parcel
+3. Dual-path resolve:
+   a. search_by_address(decedent_address)  → address_anchor matches
+   b. search_by_owner(decedent_name)       → name_match matches
+   Dedupe by parcel_number (address_anchor wins on conflict).
+4. Emit one RawListing + one tranchi.signals row per unique parcel
 
 INVARIANT: The T&C agreement page must be POSTed before any CaseSummary
 fetch. The ProwareSession.accept_agreement() call mints the ASP.NET_SessionId
@@ -44,9 +65,9 @@ cookie. Session must be reused across all ID fetches in a single run.
 INVARIANT: tranchi.probate_cursor always has exactly one row (id=1).
 The scraper reads/writes only that row. Never DELETE it.
 
-INVARIANT: A RawListing is only emitted when fiscal_officer returns at
-least one ParcelMatch. A probate case with zero matching parcels is
-logged but produces no listing row (the decedent may have been a renter).
+INVARIANT: A RawListing is emitted whenever at least one parcel is found
+via either path. A case with zero matches on both paths produces no listing
+(the decedent may have been a renter with no Cuyahoga parcel ownership).
 """
 from __future__ import annotations
 
@@ -66,7 +87,7 @@ from app.scrapers.models import RawListing
 from app.scrapers.proware_client import ProwareSession
 from app.scrapers.user_agents import random_ua
 from app.scrapers._time import today_et
-from app.scrapers.fiscal_officer import search_by_owner, ParcelMatch
+from app.scrapers.fiscal_officer import search_by_address, search_by_owner, ParcelMatch
 
 logger = logging.getLogger(__name__)
 
@@ -580,11 +601,18 @@ class ProbateScraper(ListingScraper):
                     case_number, decedent_name, dod, executor_name,
                 )
 
-                # ── Step 4: Resolve parcel via fiscal_officer ─────────────────
-                parcel_matches: list[ParcelMatch] = []
+                # ── Step 4: Dual-path parcel resolution ──────────────────────
+                # Path A (address_anchor): high-confidence home parcel via address.
+                # Path B (name_match): additional owned parcels via owner name.
+                # Dedupe by parcel_number — address_anchor wins on conflict.
+
+                # parcel_number → (ParcelMatch, join_method)
+                resolved: dict[str, tuple[ParcelMatch, str]] = {}
+
+                # Path B first so Path A can overwrite on conflict (address_anchor wins)
                 if decedent_name:
                     try:
-                        parcel_matches = await search_by_owner(
+                        name_matches = await search_by_owner(
                             decedent_name,
                             fuzzy=True,
                             enrich_detail=True,
@@ -592,17 +620,40 @@ class ProbateScraper(ListingScraper):
                             min_confidence=_MIN_CONFIDENCE,
                         )
                         logger.info(
-                            "Case %s: fiscal_officer returned %d parcel match(es) for %r",
-                            case_number, len(parcel_matches), decedent_name,
+                            "Case %s: search_by_owner returned %d match(es) for %r",
+                            case_number, len(name_matches), decedent_name,
                         )
+                        for m in name_matches:
+                            resolved[m.parcel_number] = (m, "name_match")
                     except Exception as exc:
                         logger.warning(
                             "fiscal_officer.search_by_owner failed for %r (case %s): %s",
                             decedent_name, case_number, exc,
                         )
 
+                # Path A — address_anchor overwrites name_match for the home parcel
+                if decedent_address:
+                    try:
+                        addr_matches = await search_by_address(
+                            decedent_address,
+                            enrich_detail=True,
+                        )
+                        logger.info(
+                            "Case %s: search_by_address returned %d match(es) for %r",
+                            case_number, len(addr_matches), decedent_address,
+                        )
+                        for m in addr_matches:
+                            resolved[m.parcel_number] = (m, "address_anchor")
+                    except Exception as exc:
+                        logger.warning(
+                            "fiscal_officer.search_by_address failed for %r (case %s): %s",
+                            decedent_address, case_number, exc,
+                        )
+
+                parcel_matches = [(match, method) for match, method in resolved.values()]
+
                 # ── Step 5: Emit RawListings ──────────────────────────────────
-                for match in parcel_matches:
+                for match, join_method in parcel_matches:
                     listing = _build_listing(
                         match=match,
                         case_number=case_number,
@@ -612,6 +663,7 @@ class ProbateScraper(ListingScraper):
                         executor_name=executor_name,
                         attorney_name=attorney_name,
                         probate_internal_id=current_id,
+                        join_method=join_method,
                     )
                     all_listings.append(listing)
 
@@ -628,7 +680,8 @@ class ProbateScraper(ListingScraper):
 
                 if not parcel_matches:
                     logger.info(
-                        "Case %s: no parcels found for decedent %r (likely renter or name mismatch)",
+                        "Case %s: no parcels found for decedent %r via either path "
+                        "(likely renter or name/address mismatch)",
                         case_number, decedent_name,
                     )
 
@@ -697,13 +750,18 @@ def _build_listing(
     executor_name: str | None,
     attorney_name: str | None,
     probate_internal_id: int,
+    join_method: str = "name_match",
 ) -> RawListing:
     """
     Build one RawListing from a ParcelMatch for a probate Estate case.
 
     One listing per matched parcel. The parcel's situs_address becomes
     the property_address; the executor becomes trustee_name.
-    All metadata is stored in the listing fields that map to DB columns.
+
+    join_method is stored in the listing metadata to indicate how the parcel
+    was resolved:
+      "address_anchor" — matched via decedent_address (high confidence, 0.95+)
+      "name_match"     — matched via decedent_name owner search (fuzzy, 0.75+)
     """
     # Property address comes from the fiscal_officer match (most reliable)
     address = match.situs_address or ""
