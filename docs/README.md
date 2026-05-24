@@ -82,8 +82,8 @@ Architecture intentionally mirrors Gotham (sister project for Maryland) — same
 |---|---|---|---|---|
 | Cuyahoga Land Bank | Listing | listings | 1 | ✅ shipped |
 | Cuyahoga Sheriff Sales | Listing | listings | 1 | ✅ shipped |
-| Cuyahoga Fiscal Officer (MyPlace) | Listing + parcel registry | listings + parcels + signals | 1 | 🔄 building |
-| Cuyahoga Probate Court | Listing (via fiscal_officer join) | listings | 1 | ⏳ pending fiscal_officer |
+| Cuyahoga Fiscal Officer (MyPlace) | Parcel registry / enrichment spine | parcels (+ optional tax signals) | 1 | ✅ shipped |
+| Cuyahoga Probate Court | Listing (via fiscal_officer name/address join) | listings + signals | 1 | ✅ shipped |
 | Cleveland Code Violations | Signal | signals | 1 | ✅ shipped |
 | Cuyahoga Common Pleas (lis pendens) | Listing | listings | 2 | spec'd |
 | Cleveland Vacant Property Registry | Signal | signals | 2 | spec'd |
@@ -135,7 +135,9 @@ Per Marc's directive: low-detection generic browser identity, NOT identified bot
 
 - **Engagement state + Marc context:** `Intelleq-Library-Of-Babel/Clients/Marc/` (README, SOUL.md, call transcripts)
 - **Field-map research artifacts:** `Intelleq-Library-Of-Babel/Clients/Marc/tranchi/research/cuyahoga-field-map.md` (+ screenshots)
-- **Plan files:** `~/.claude/plans/ok-please-go-through-jolly-metcalfe.md` (this session's plan)
-- **EC2 deploy:** `/home/ubuntu/tranchi-engine/` (port 8011)
+- **Live dashboard:** https://tranchi.intelleqn8n.net (nginx static + `/api/` → API)
+- **Read API:** `tranchi-api.service` on `127.0.0.1:8012` (NOT 8011 — that's intelleq-chat)
+- **EC2 deploy:** `/home/ubuntu/tranchi-engine/` (backend); frontend build served from `/var/www/tranchi/`
 - **Logs:** `/var/log/tranchi/scrape.log`
 - **Database:** `tranchi` DB on intelleq-ec2 Postgres
+- **Phase 2 backlog:** `docs/PHASE-2-BACKLOG.md`

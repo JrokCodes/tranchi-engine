@@ -16,7 +16,7 @@
   ```
   DATABASE_URL=postgresql+asyncpg://<user>:<pw>@localhost:5432/tranchi
   ```
-  Set in `/home/ubuntu/tranchi-engine/.env` (chmod 600, owner ubuntu).
+  Set in `/home/ubuntu/tranchi-engine/backend/.env` (chmod 600, owner ubuntu).
 
 ### Migrations
 
@@ -26,27 +26,28 @@ cd /home/ubuntu/tranchi-engine/backend
 alembic upgrade head
 ```
 
-Initial schema: `001_tranchi_schema.py`. Adds: listings, parcels, signals, scrape_runs + indexes.
-
-**TODO before production cron:**
-- Add migration `002_probate_cursor.py` (created by probate scraper agent)
-- Add migration `003_signals_unique_index.py` for the missing `uq_tranchi_signals_natural_key` on `(parcel_number, signal_type, source, (observed_at::date))` — flagged in code_violations.md
+Applied migrations (alembic head = **003**):
+- `001_tranchi_schema.py` — listings, parcels, signals, scrape_runs + indexes
+- `002_probate_cursor.py` — probate ID-cursor state table
+- `003_signals_unique_index.py` — `uq_tranchi_signals_natural_key` on `(parcel_number, signal_type, source, (observed_at::date))`
 
 ## Filesystem layout
 
 ```
-/home/ubuntu/tranchi-engine/
-├── backend/             ← git clone of this repo
+/home/ubuntu/tranchi-engine/    ← git repo root (run `git pull` here)
+├── backend/
 │   ├── app/
 │   ├── alembic/
 │   ├── venv/            ← Python venv
-│   ├── .env             ← secrets (DATABASE_URL, etc.)
+│   ├── .env             ← secrets (DATABASE_URL, etc.) — chmod 600
 │   └── requirements.txt
-└── .git/
+├── frontend/            ← React dashboard source (built locally, NOT on EC2)
+├── docs/
+└── deploy/              ← nginx-tranchi.conf template
 
+/var/www/tranchi/        ← built dashboard (rsync target; served by nginx)
 /var/log/tranchi/
-├── scrape.log           ← cron stdout/stderr
-└── error.log            ← (Phase C: structured error log)
+└── scrape.log           ← cron stdout/stderr
 ```
 
 ## Initial deploy
@@ -105,9 +106,9 @@ python -m app.scrapers.run --site land_bank --dry-run
 
 Add to `/etc/logrotate.d/tranchi`.
 
-## API service (next session)
+## API service (LIVE — port 8012)
 
-Port 8011. Systemd unit (next session deliverable):
+`tranchi-api.service` (systemd) serves the FastAPI read API on `127.0.0.1:8012`. **Port 8012, not 8011** — 8011 is taken by `intelleq-chat.service`.
 
 ```ini
 # /etc/systemd/system/tranchi-api.service
@@ -120,7 +121,7 @@ Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/tranchi-engine/backend
 EnvironmentFile=/home/ubuntu/tranchi-engine/backend/.env
-ExecStart=/home/ubuntu/tranchi-engine/backend/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8011
+ExecStart=/home/ubuntu/tranchi-engine/backend/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8012
 Restart=on-failure
 RestartSec=5
 
@@ -128,11 +129,26 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
-(API endpoint scaffold exists in `app/main.py` but isn't built out yet — that's the next session's work.)
+Redeploy backend code (pull + restart + health check):
+```bash
+ssh intelleq-ec2 "cd /home/ubuntu/tranchi-engine && git pull && sudo systemctl restart tranchi-api && sleep 2 && curl -s 127.0.0.1:8012/health"
+```
 
-## Cloudflare Zero Trust (next session)
+## Frontend / dashboard deploy (LIVE)
 
-When the API ships, add a Cloudflare tunnel routing the public hostname → `127.0.0.1:8011`. Same pattern as Gotham (port 8010). Reference: Gotham's Cloudflare config.
+Static React build, served by nginx from `/var/www/tranchi/`; nginx proxies `/api/` → `127.0.0.1:8012`. nginx site config: `/etc/nginx/sites-available/tranchi` (template kept in `deploy/nginx-tranchi.conf`). Build happens **locally** (not on EC2):
+
+```bash
+cd frontend && npm run build
+rsync -az --delete -e ssh dist/ intelleq-ec2:/var/www/tranchi/
+```
+
+## Public hostname + TLS + auth
+
+- **DNS:** `tranchi.intelleqn8n.net` → `18.219.255.79` (Cloudflare-proxied A record).
+- **TLS:** Let's Encrypt via `sudo certbot --nginx -d tranchi.intelleqn8n.net` — same nginx (HTTP-01) authenticator as Gotham. **Not** a cloudflared tunnel.
+- **Auth:** ⚠️ Cloudflare Zero Trust Access gate is **NOT yet configured** — the dashboard is currently **public**. To gate it: Zero Trust dashboard → Access → Applications → add a self-hosted app on `tranchi.intelleqn8n.net` → Allow policy listing the permitted emails (Jayden + Marc). Same pattern as Gotham.
+- **Note:** the CF API token at `/home/ubuntu/.secrets/cloudflare/api-token` is currently **invalid** (rotated/expired) — DNS/Access changes must be done in the dashboard or with a fresh token. Cert issuance does NOT need it (uses nginx HTTP-01).
 
 ## Backup
 
