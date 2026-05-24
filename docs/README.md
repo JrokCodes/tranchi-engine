@@ -9,6 +9,7 @@ If you are new to this repo, read in this order:
 3. **`verification.md`** — how to confirm a scraper is correct end-to-end
 4. **`deployment.md`** — getting it running on EC2
 5. **`expansion.md`** — adding a new county or new source type
+6. **`PHASE-2-BACKLOG.md`** — prioritized next work (top: Realauction login-walled tax-deed source)
 
 ## What this engine does
 

@@ -20,9 +20,22 @@ logger = logging.getLogger(__name__)
 # Cron is every 3 hours; allow a 60-min buffer before marking offline.
 _ONLINE_THRESHOLD_SECONDS = 4 * 3600
 
+# Per-source metadata: the real public site each scraper pulls from, and the
+# source's role. "deal" sources create listings; "signal" sources tag parcels
+# with distress signals; "registry" is the parcel identity/enrichment spine.
+_SOURCE_META: dict[str, tuple[str | None, str]] = {
+    "Cuyahoga Land Bank": ("https://cuyahogalandbank.org/all-available-properties/", "deal"),
+    "Cuyahoga Sheriff Sales": ("https://cpdocket.cp.cuyahogacounty.gov/sheriffsearch/search.aspx", "deal"),
+    "Cuyahoga Probate Court": ("https://probate.cuyahogacounty.gov/pa/", "deal"),
+    "Cleveland Code Violations": ("https://data.clevelandohio.gov/", "signal"),
+    "Cuyahoga Fiscal Officer": ("https://myplace.cuyahogacounty.gov", "registry"),
+}
+
 
 class SourceCard(BaseModel):
     source_site: str
+    source_url: str | None
+    category: str  # "deal" | "signal" | "registry"
     status: str
     online: bool
     started_at: datetime | None
@@ -88,9 +101,12 @@ async def get_sources(
             minutes_since = int(elapsed // 60)
             online = r["status"] == "success" and elapsed <= _ONLINE_THRESHOLD_SECONDS
 
+        meta = _SOURCE_META.get(r["source_site"], (None, "deal"))
         sources.append(
             SourceCard(
                 source_site=r["source_site"],
+                source_url=meta[0],
+                category=meta[1],
                 status=r["status"] or "unknown",
                 online=online,
                 started_at=started_at,

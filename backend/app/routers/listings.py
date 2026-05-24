@@ -7,10 +7,14 @@ No auth required (Cloudflare gates the public hostname).
 
 INVARIANT — signal join key: listings.source_listing_id = signals.parcel_number = parcels.parcel_number
 All three carry the display-format parcel number (e.g. "541-12-123"). listings has NO parcel_number column.
-INVARIANT — is_hot = signal_count >= 2 (20 listings as of first deploy; must match DB count).
+INVARIANT — is_hot = (# distinct distress DIMENSIONS) >= 2. The listing's own source is one
+dimension; stacked signals (code violations, tax flags, probate) add more. Multiple records of
+the same type (e.g. 3 code-violation notices) count as ONE dimension. Computed in Python from the
+per-parcel type_counts aggregate (see _build_signal_types).
 """
 from __future__ import annotations
 
+import json
 import logging
 from datetime import date, datetime
 from decimal import Decimal
@@ -36,6 +40,12 @@ _VALID_ORDER = {"asc", "desc"}
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+class SignalTypeChip(BaseModel):
+    """One distinct distress dimension on a listing's parcel (e.g. {"Code Violation", 3})."""
+    label: str
+    count: int
+
+
 class ListingItem(BaseModel):
     id: UUID
     source_site: str
@@ -55,7 +65,8 @@ class ListingItem(BaseModel):
     first_seen_at: datetime | None
     last_seen_at: datetime | None
     signal_count: int
-    signal_types: list[str]
+    signal_types: list[SignalTypeChip]
+    signal_type_count: int
     is_hot: bool
     # Parcel fields (null if no parcel match)
     owner_name: str | None
@@ -116,11 +127,60 @@ def _to_float(v: Decimal | float | int | None) -> float | None:
     return float(v)
 
 
+# Maps a raw signal_type (from listings.signal_type OR signals.signal_type) to a
+# human distress DIMENSION label. Same-dimension records collapse (e.g. all tax
+# flags → "Tax Distress"; the probate signal on a probate listing → "Probate").
+_DIM_MAP: dict[str, str] = {
+    "land_bank_inventory": "Land Bank",
+    "tax_delinquent_foreclosure": "Tax Foreclosure",
+    "probate": "Probate",
+    "code_violation": "Code Violation",
+    "code_violation_task": "Code Violation",
+    "tax_foreclosure": "Tax Distress",
+    "cert_pending": "Tax Distress",
+    "cert_sold": "Tax Distress",
+    "tax_payment_plan": "Tax Distress",
+    "tax_delinquent": "Tax Distress",
+}
+
+
+def _dimension(raw: str | None) -> str | None:
+    if not raw:
+        return None
+    return _DIM_MAP.get(raw, raw.replace("_", " ").title())
+
+
+def _build_signal_types(
+    listing_signal_type: str | None, type_counts: dict
+) -> tuple[list[SignalTypeChip], int]:
+    """Merge the listing's own source dimension with the per-parcel stacked
+    signal types into distinct dimensions. Returns (chips, distinct_count)."""
+    order: list[str] = []
+    counts: dict[str, int] = {}
+
+    base = _dimension(listing_signal_type)
+    if base:
+        counts[base] = 1
+        order.append(base)
+
+    for raw, cnt in (type_counts or {}).items():
+        label = _dimension(raw)
+        if not label or label in counts:
+            # unknown, or same dimension already represented (no double-count)
+            continue
+        counts[label] = int(cnt)
+        order.append(label)
+
+    chips = [SignalTypeChip(label=lbl, count=counts[lbl]) for lbl in order]
+    return chips, len(order)
+
+
 def _row_to_item(r: asyncpg.Record) -> ListingItem:
     """Map a DB row (from the main listing query) to a ListingItem."""
-    raw_types = r["signal_types"]
-    # asyncpg returns text[] as a Python list; handle None
-    types_list: list[str] = list(raw_types) if raw_types else []
+    raw_counts = r["type_counts"]
+    if isinstance(raw_counts, str):
+        raw_counts = json.loads(raw_counts)
+    chips, type_count = _build_signal_types(r["signal_type"], raw_counts or {})
     sig_count = int(r["signal_count"] or 0)
 
     return ListingItem(
@@ -142,8 +202,9 @@ def _row_to_item(r: asyncpg.Record) -> ListingItem:
         first_seen_at=r["first_seen_at"],
         last_seen_at=r["last_seen_at"],
         signal_count=sig_count,
-        signal_types=types_list,
-        is_hot=sig_count >= 2,
+        signal_types=chips,
+        signal_type_count=type_count,
+        is_hot=type_count >= 2,
         owner_name=r["owner_name"],
         situs_address=r["situs_address"],
         current_market_value=_to_float(r["current_market_value"]),
@@ -176,7 +237,7 @@ _BASE_SELECT = """
         l.first_seen_at,
         l.last_seen_at,
         COALESCE(sig.n, 0)              AS signal_count,
-        COALESCE(sig.types, ARRAY[]::text[]) AS signal_types,
+        sig.type_counts                 AS type_counts,
         p.owner_name,
         p.situs_address,
         p.current_market_value,
@@ -185,9 +246,13 @@ _BASE_SELECT = """
     FROM tranchi.listings l
     LEFT JOIN (
         SELECT parcel_number,
-               count(*)                          AS n,
-               array_agg(DISTINCT signal_type)  AS types
-        FROM tranchi.signals
+               jsonb_object_agg(signal_type, cnt) AS type_counts,
+               sum(cnt)::int                       AS n
+        FROM (
+            SELECT parcel_number, signal_type, count(*) AS cnt
+            FROM tranchi.signals
+            GROUP BY parcel_number, signal_type
+        ) z
         GROUP BY parcel_number
     ) sig ON sig.parcel_number = l.source_listing_id
     LEFT JOIN tranchi.parcels p ON p.parcel_number = l.source_listing_id

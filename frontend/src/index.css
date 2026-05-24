@@ -1,0 +1,84 @@
+@import '@fontsource/dm-sans/400.css';
+@import '@fontsource/dm-sans/500.css';
+@import '@fontsource/dm-sans/600.css';
+@import "tailwindcss";
+
+@theme {
+  /* ─── Tranchi light theme ─────────────────────────────────────────── */
+  --color-bg-base: #FFFFFF;
+  --color-bg-subtle: #F6F7F9;
+  --color-bg-card: #FFFFFF;
+  --color-bg-elevated: #F0F2F5;
+
+  --color-ink: #1A1A2E;
+  --color-navy: #1A2B4A;
+  --color-slate: #5A6A7A;
+  --color-muted: #8A96A3;
+
+  --color-gold: #C9A84C;
+  --color-gold-light: #F5E6C0;
+  --color-success: #16A34A;
+  --color-danger: #DC2626;
+
+  --color-border: rgba(26, 43, 74, 0.10);
+  --color-border-subtle: rgba(26, 43, 74, 0.06);
+
+  --font-heading: 'General Sans', system-ui, sans-serif;
+  --font-body: 'DM Sans', system-ui, sans-serif;
+}
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    font-family: var(--font-body);
+    background-color: var(--color-bg-base);
+    color: var(--color-ink);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    margin: 0;
+  }
+
+  #root {
+    display: block;
+    width: 100%;
+    min-height: 100vh;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font-heading);
+  }
+}
+
+/* Scrollbar — light, minimal */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(26, 43, 74, 0.15);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(26, 43, 74, 0.25);
+}
+
+/* Drawer content fade-in */
+@keyframes drawerFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
