@@ -13,7 +13,9 @@ export interface FilterState {
 
 export const defaultFilters: FilterState = {
   source_site: '',
-  status: '',
+  // Default to active deals so the past/expired sheriff archive doesn't clutter
+  // the buyable-listings view. Users can still pick Expired/Cancelled explicitly.
+  status: 'active',
   has_signals: false,
   q: '',
   sort: 'first_seen_at',
@@ -22,6 +24,7 @@ export const defaultFilters: FilterState = {
 
 const SOURCE_OPTIONS = [
   'Cuyahoga Land Bank',
+  'Cuyahoga Sheriff Sale (DLN)',
   'Cuyahoga Sheriff Sales',
   'Cuyahoga Probate Court',
 ];

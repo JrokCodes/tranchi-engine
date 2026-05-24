@@ -222,12 +222,25 @@ def _parse_result_page(html: str, fallback_date: date) -> list[RawListing]:
         if not street:
             street = f"Unknown — Case {case_number}"
 
-        # Determine listing status
+        # Determine listing status + preserve the granular auction outcome.
+        # auction_status keeps the verbatim outcome (SOLD / NO BID FORFEIT TO STATE /
+        # WITHDRAWN / …) which the coarse `status` collapses. WHY: the outcome is
+        # exactly what separates a LEAD from noise — forfeit-to-state (no bid → flows
+        # to the Land Bank, acquirable) and withdrawn/cancelled (owner settled but
+        # still owns it → motivated seller) are real leads; a completed "sold" is not.
         status_lower = (status_raw or "").lower()
-        if any(k in status_lower for k in ("sold", "forfeit", "withdrawn", "cancelled", "canceled")):
+        auction_status = " ".join(status_raw.split()) if status_raw else None
+        if any(k in status_lower for k in ("sold", "forfeit", "withdrawn", "cancelled", "canceled", "vacated", "bankruptcy")):
             listing_status = "expired"
         else:
             listing_status = "active"
+
+        # Lead recovery: drop the distress signal_type ONLY for completed sales —
+        # the property changed hands, so it's a comp, not a lead. Forfeit-to-state
+        # and all other unresolved/withdrawn outcomes keep tax_delinquent_foreclosure
+        # so they still stack as a distress dimension.
+        is_completed_sale = "sold" in status_lower and "forfeit" not in status_lower
+        signal_type = None if is_completed_sale else "tax_delinquent_foreclosure"
 
         # Defendant is the foreclosed property owner. RawListing.trustee_name is
         # the closest available field (used for attorney/firm name in Gotham scrapers
@@ -239,7 +252,7 @@ def _parse_result_page(html: str, fallback_date: date) -> list[RawListing]:
         listings.append(
             RawListing(
                 source_site="Cuyahoga Sheriff Sales",
-                signal_type="tax_delinquent_foreclosure",
+                signal_type=signal_type,
                 case_number=case_number,
                 source_listing_id=parcel_number,   # Parcel # is the cross-source join key
                 property_address=street,
@@ -253,6 +266,7 @@ def _parse_result_page(html: str, fallback_date: date) -> list[RawListing]:
                 trustee_name=defendant_clean,
                 sale_location=None,
                 status=listing_status,
+                auction_status=auction_status,
             )
         )
 

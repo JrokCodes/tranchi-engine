@@ -232,7 +232,11 @@ function DrawerContent({ listingId, onClose }: { listingId: string; onClose: () 
           {listing.case_number && <KvRow label="Case #" value={listing.case_number} />}
           {listing.trustee_name && <KvRow label="Trustee" value={listing.trustee_name} />}
           {listing.sale_date && <KvRow label="Sale Date" value={formatDate(listing.sale_date)} />}
+          {listing.sec_sale_date && <KvRow label="Re-offer Date" value={formatDate(listing.sec_sale_date)} />}
+          {listing.opening_bid_usd != null && <KvRow label="Opening Bid" value={formatCurrency(listing.opening_bid_usd)} />}
+          {listing.appraised_value_usd != null && <KvRow label="Appraised Value" value={formatCurrency(listing.appraised_value_usd)} />}
           {listing.deposit_usd != null && <KvRow label="Deposit" value={formatCurrency(listing.deposit_usd)} />}
+          {listing.auction_status && <KvRow label="Auction Status" value={listing.auction_status} />}
           {listing.source_listing_id && <KvRow label="Source ID" value={listing.source_listing_id} />}
           <KvRow label="First Seen" value={formatRelative(listing.first_seen_at)} />
           <KvRow label="Last Seen" value={formatRelative(listing.last_seen_at)} />

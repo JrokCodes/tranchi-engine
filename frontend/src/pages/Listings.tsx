@@ -44,7 +44,7 @@ export default function Listings() {
     return {
       ...defaultFilters,
       source_site: searchParams.get('source_site') ?? '',
-      status: searchParams.get('status') ?? '',
+      status: searchParams.get('status') ?? 'active',
       has_signals: searchParams.get('has_signals') === 'true',
       q: searchParams.get('q') ?? '',
       sort: (searchParams.get('sort') as SortKey) ?? 'first_seen_at',

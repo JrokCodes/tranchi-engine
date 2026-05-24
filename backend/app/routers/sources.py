@@ -26,6 +26,7 @@ _ONLINE_THRESHOLD_SECONDS = 4 * 3600
 _SOURCE_META: dict[str, tuple[str | None, str]] = {
     "Cuyahoga Land Bank": ("https://cuyahogalandbank.org/all-available-properties/", "deal"),
     "Cuyahoga Sheriff Sales": ("https://cpdocket.cp.cuyahogacounty.gov/sheriffsearch/search.aspx", "deal"),
+    "Cuyahoga Sheriff Sale (DLN)": ("https://www.dln.com/", "deal"),
     "Cuyahoga Probate Court": ("https://probate.cuyahogacounty.gov/pa/", "deal"),
     "Cleveland Code Violations": ("https://data.clevelandohio.gov/", "signal"),
     "Cuyahoga Fiscal Officer": ("https://myplace.cuyahogacounty.gov", "registry"),

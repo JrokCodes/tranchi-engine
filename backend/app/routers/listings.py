@@ -58,7 +58,11 @@ class ListingItem(BaseModel):
     status: str | None
     pipeline_status: str | None
     sale_date: date | None
+    sec_sale_date: date | None
     deposit_usd: float | None
+    opening_bid_usd: float | None
+    appraised_value_usd: float | None
+    auction_status: str | None
     trustee_name: str | None
     case_number: str | None
     source_listing_id: str | None
@@ -133,6 +137,7 @@ def _to_float(v: Decimal | float | int | None) -> float | None:
 _DIM_MAP: dict[str, str] = {
     "land_bank_inventory": "Land Bank",
     "tax_delinquent_foreclosure": "Tax Foreclosure",
+    "mortgage_foreclosure": "Foreclosure (Mortgage)",
     "probate": "Probate",
     "code_violation": "Code Violation",
     "code_violation_task": "Code Violation",
@@ -195,7 +200,11 @@ def _row_to_item(r: asyncpg.Record) -> ListingItem:
         status=r["status"],
         pipeline_status=r["pipeline_status"],
         sale_date=r["sale_date"],
+        sec_sale_date=r["sec_sale_date"],
         deposit_usd=_to_float(r["deposit_usd"]),
+        opening_bid_usd=_to_float(r["opening_bid_usd"]),
+        appraised_value_usd=_to_float(r["appraised_value_usd"]),
+        auction_status=r["auction_status"],
         trustee_name=r["trustee_name"],
         case_number=r["case_number"],
         source_listing_id=r["source_listing_id"],
@@ -230,7 +239,11 @@ _BASE_SELECT = """
         l.status,
         l.pipeline_status,
         l.sale_date,
+        l.sec_sale_date,
         l.deposit_usd,
+        l.opening_bid_usd,
+        l.appraised_value_usd,
+        l.auction_status,
         l.trustee_name,
         l.case_number,
         l.source_listing_id,

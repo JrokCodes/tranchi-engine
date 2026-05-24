@@ -1,15 +1,25 @@
 # Phase 2 Backlog — Tranchi Engine
 
-Prioritized work after the Phase 1 build (5 Cuyahoga sources live + read API + dashboard). Top item is the **tax-deed expansion**, which Jayden plans to attempt next.
+Prioritized work after the Phase 1 build (5 Cuyahoga sources live + read API + dashboard).
 
-## 1. (PRIORITY) Realauction — upcoming tax-deed / sheriff auctions  🔒 login-walled
-**Why:** The current `sheriff.py` scraper only sees the **last ~30 days of *past*** tax-delinquent foreclosure sales (the ProWare docket dropdown has no future dates), so they land as `status=expired`. The actionable, *upcoming* tax-deed auctions — exactly the "tax deed records" Marc asked for — live on **Realauction** (`cuyahoga.sheriffsaleauction.ohio.gov` / `realauction.com`).
-**The catch:** Realauction is behind a **login wall** (free account registration, sometimes a deposit gate to bid, but the auction *calendar + property list* is usually viewable post-login). Needs an auth/session strategy:
-- Register a Tranchi account; store creds in `/home/ubuntu/.secrets/tranchi/` (mode 600).
-- Establish an authenticated session (cookie jar) before scraping the auction calendar + per-property detail.
-- Likely needs Playwright (JS-driven portal) rather than plain httpx — accept the heavier footprint here.
-- Respect the site: low request rate, generic UA, no bidding actions — read-only.
-**Output:** `tranchi.listings`, `signal_type="tax_delinquent_foreclosure"`, `status=active` with a real future `sale_date`.
+## 0. ✅ SHIPPED (2026-05-24) — Upcoming tax-deed + mortgage sales via Daily Legal News
+The actionable *upcoming* sales Marc asked for now land via **`dln.py`** (source_site
+`"Cuyahoga Sheriff Sale (DLN)"`). DLN is the official county legal-notice journal exposing a
+public WordPress REST API (`/wp-json/dln/v1/data-table?type=delinquent-tax | sheriff-sales`) —
+no auth, no EULA, robots allow-all, future-dated, both tax + mortgage. This **supersedes** the
+court-docket and Realauction plans below. Migration `004` added `auction_status`,
+`opening_bid_usd`, `appraised_value_usd`, `sec_sale_date`. `sheriff.py` now preserves
+`auction_status` for lead recovery. Cross-source dedup is parcel-aware. See
+`Clients/Marc/tranchi/research/dln-field-map.md`.
+
+## 1. Realauction — EVALUATED → DEFERRED (not built)
+**Decision:** deferred. DLN (item 0) already provides the same upcoming sales from a clean public
+source weeks earlier. Realauction's only marginal value is the *live* current-auction delta
+(re-offer dates, ~1–3 last-minute adds, during-sale sold/high-bid status) — not worth its
+`robots: Disallow:/` + redistribution-EULA friction. A secure **unauthenticated** scrape is
+feasible (no hard blocker found) if ever revived; full mechanics + coverage head-to-head preserved
+in **`Clients/Marc/tranchi/research/realauction-findings.md`**. Revisit only if Marc wants live
+during-auction tracking.
 
 ## 2. Sheriff backfill (quick win, no new code)
 `sheriff.py` already supports `SHERIFF_BACKFILL=1` (env) / `backfill=True` to pull **all ~18 historical tax-delinquent sale dates** in one run instead of the 30-day lookback. Run once to thicken historical coverage. Trade-off: they're past sales (expired) — useful as records, not live deals.

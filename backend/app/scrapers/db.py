@@ -449,18 +449,22 @@ async def _upsert_one(
         await conn.execute(
             """
             UPDATE tranchi.listings
-            SET last_seen_at        = NOW(),
-                deposit_usd        = COALESCE($1, deposit_usd),
-                status             = $2,
-                normalized_address = COALESCE($3, normalized_address),
-                property_county    = COALESCE($4, property_county),
-                property_address   = COALESCE($5, property_address),
-                property_city      = COALESCE($6, property_city),
-                property_zip       = COALESCE($7, property_zip),
-                sale_date          = COALESCE($8, sale_date),
-                signal_type        = COALESCE($9, signal_type),
-                source_listing_id  = COALESCE($10, source_listing_id)
-            WHERE id = $11
+            SET last_seen_at         = NOW(),
+                deposit_usd         = COALESCE($1, deposit_usd),
+                status              = $2,
+                normalized_address  = COALESCE($3, normalized_address),
+                property_county     = COALESCE($4, property_county),
+                property_address    = COALESCE($5, property_address),
+                property_city       = COALESCE($6, property_city),
+                property_zip        = COALESCE($7, property_zip),
+                sale_date           = COALESCE($8, sale_date),
+                signal_type         = COALESCE($9, signal_type),
+                source_listing_id   = COALESCE($10, source_listing_id),
+                auction_status      = COALESCE($11, auction_status),
+                opening_bid_usd     = COALESCE($12, opening_bid_usd),
+                appraised_value_usd = COALESCE($13, appraised_value_usd),
+                sec_sale_date       = COALESCE($14, sec_sale_date)
+            WHERE id = $15
             """,
             listing.deposit_usd,
             listing.status,
@@ -472,6 +476,10 @@ async def _upsert_one(
             listing.sale_date,
             listing.signal_type,
             norm_parcel,
+            listing.auction_status,
+            listing.opening_bid_usd,
+            listing.appraised_value_usd,
+            listing.sec_sale_date,
             existing_id,
         )
         return existing_id, False
@@ -483,13 +491,15 @@ async def _upsert_one(
             property_city, property_county, property_state,
             property_zip, sale_date, sale_time, sale_location,
             deposit_usd, trustee_name, status, normalized_address,
-            signal_type, source_listing_id
+            signal_type, source_listing_id,
+            auction_status, opening_bid_usd, appraised_value_usd, sec_sale_date
         ) VALUES (
             $1,  $2,  $3,
             $4,  $5,  $6,
             $7,  $8,  $9,  $10,
             $11, $12, $13, $14,
-            $15, $16
+            $15, $16,
+            $17, $18, $19, $20
         )
         RETURNING id
         """,
@@ -509,6 +519,10 @@ async def _upsert_one(
         norm_addr,
         listing.signal_type,
         norm_parcel,
+        listing.auction_status,
+        listing.opening_bid_usd,
+        listing.appraised_value_usd,
+        listing.sec_sale_date,
     )
     return new_id, True
 

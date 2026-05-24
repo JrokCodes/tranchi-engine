@@ -39,7 +39,11 @@ export interface ApiListingItem {
   property_zip: string;
   status: ListingStatus;
   sale_date: string | null;
+  sec_sale_date: string | null;
   deposit_usd: number | null;
+  opening_bid_usd: number | null;
+  appraised_value_usd: number | null;
+  auction_status: string | null;
   trustee_name: string | null;
   case_number: string | null;
   source_listing_id: string | null;

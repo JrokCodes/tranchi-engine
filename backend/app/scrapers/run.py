@@ -11,11 +11,14 @@ Exit code:
     0 — all scrapers succeeded (or no errors)
     1 — at least one scraper had errors
 
-Dedup invariant: _dedup_cross_source_listings collapses by normalized_address
-ALONE across the live pool (status IN ('active','not_listed')). Same source +
-same address counts as a duplicate. NULL sale_date does not split clusters.
-Canonical row = most recent non-NULL sale_date, tiebroken by oldest first_seen_at.
-Expired/cancelled rows are excluded so re-listed properties re-canonicalize cleanly.
+Dedup invariant: _dedup_cross_source_listings collapses by normalized PARCEL
+(source_listing_id, display format DDD-NN-NNN) when present, else by
+normalized_address, across the live pool (status IN ('active','not_listed')).
+Parcel-primary keying collapses the same property across sources even when the
+address strings differ. NULL sale_date does not split clusters. Canonical row =
+most recent non-NULL sale_date (fresh re-offer beats stale original), tiebroken
+by oldest first_seen_at. Expired/cancelled rows are excluded so re-listed
+properties re-canonicalize cleanly.
 """
 from __future__ import annotations
 
@@ -55,6 +58,7 @@ from app.scrapers.code_violations import (  # noqa: E402
     upsert_signals as _cv_upsert_signals,
 )
 from app.scrapers.db import upsert_listings  # noqa: E402
+from app.scrapers.dln import DLNScraper  # noqa: E402
 from app.scrapers.fiscal_officer import (  # noqa: E402
     FiscalOfficerScraper,
     upsert_parcels as _fo_upsert_parcels,
@@ -77,6 +81,7 @@ _SCRAPERS: dict[str, type] = {
     "sheriff_sales": SheriffSalesScraper,
     "fiscal_officer": FiscalOfficerScraper,
     "probate": ProbateScraper,
+    "dln": DLNScraper,
 }
 
 
@@ -154,6 +159,11 @@ async def _run_scraper(
         # Probate manages its own cursor (tranchi.probate_cursor) and signal
         # writes internally, so it needs the pool + dry_run flag at construction.
         # It still returns RawListings that flow through the standard listing path.
+        scraper = scraper_cls(pool=pool, dry_run=dry_run)
+    elif scraper_key == "dln":
+        # DLN resolves tax-sale addresses against tranchi.parcels + on-demand
+        # MyPlace lookups (cached back), so it needs the pool + dry_run flag.
+        # Still a plain ListingScraper — output flows through the listing path.
         scraper = scraper_cls(pool=pool, dry_run=dry_run)
     else:
         scraper = scraper_cls()
@@ -391,12 +401,18 @@ async def _mark_stale_listings(
 
 
 async def _dedup_cross_source_listings(pool: asyncpg.Pool) -> int:
-    """Collapse live listings sharing a normalized_address into one canonical row.
+    """Collapse live listings of the SAME property into one canonical row.
+
+    Cluster key = normalized parcel number (source_listing_id, stored in display
+    format DDD-NN-NNN at upsert) when present, else normalized_address. Parcel is
+    exact and survives address-string drift across DLN / sheriff / land-bank /
+    probate — critical now that multiple sources describe the same parcel.
 
     Live pool = status IN ('active','not_listed'). Canonical preference:
-    rows with a real sale_date over NULL, then most-recent sale_date,
-    then oldest first_seen_at. All other live rows in the cluster get
-    duplicate_of set to the canonical id. Returns count of flagged dupes.
+    rows with a real sale_date over NULL, then most-recent sale_date (so a fresh
+    re-offer date wins over a stale original), then oldest first_seen_at. All
+    other live rows in the cluster get duplicate_of set to the canonical id.
+    Returns count of flagged dupes.
     """
     try:
         async with pool.acquire() as conn:
@@ -405,14 +421,14 @@ async def _dedup_cross_source_listings(pool: asyncpg.Pool) -> int:
                 WITH clusters AS (
                     SELECT
                         id,
-                        normalized_address,
+                        COALESCE(NULLIF(source_listing_id, ''), normalized_address) AS cluster_key,
                         FIRST_VALUE(id) OVER (
-                            PARTITION BY normalized_address
+                            PARTITION BY COALESCE(NULLIF(source_listing_id, ''), normalized_address)
                             ORDER BY (sale_date IS NULL), sale_date DESC NULLS LAST, first_seen_at, id
                         ) AS canonical_id
                     FROM tranchi.listings
                     WHERE status IN ('active', 'not_listed')
-                      AND normalized_address IS NOT NULL
+                      AND COALESCE(NULLIF(source_listing_id, ''), normalized_address) IS NOT NULL
                 )
                 UPDATE tranchi.listings l
                 SET duplicate_of = CASE

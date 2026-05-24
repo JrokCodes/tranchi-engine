@@ -1,5 +1,12 @@
 # Cuyahoga Sheriff Sales
 
+> **PAST-ONLY.** This ProWare docket is a historical archive — confirmed 2026-05-24 by a full
+> Print Sale List export (1,707 records, max date 5/20/2026, **zero future dates**); the date-range
+> search returns the same trailing window regardless of input. **UPCOMING** sheriff sales (tax +
+> mortgage) come from **Daily Legal News** (`dln.py`) — see `docs/sites/` peers + `PHASE-2-BACKLOG.md`.
+> As of 2026-05-24 this scraper preserves the granular outcome in `auction_status` and drops the
+> `signal_type` for completed "sold" rows (forfeit-to-state + withdrawn remain leads).
+
 ## Source
 
 - **URL:** https://cpdocket.cp.cuyahogacounty.gov/sheriffsearch/search.aspx

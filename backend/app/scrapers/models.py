@@ -31,6 +31,15 @@ class RawListing(BaseModel):
     trustee_name: str | None = None
     sale_location: str | None = None
     status: str = "active"
+    # Raw upstream auction outcome/state, preserved verbatim and SEPARATE from the
+    # coarse `status` (active/expired). Lets forfeit-to-state (acquirable) and
+    # withdrawn (motivated owner) survive as leads instead of collapsing to 'expired'.
+    auction_status: str | None = None
+    # Minimum/opening bid (DLN min_bid; tax = taxes + cost). Appraised value (DLN appr_value).
+    opening_bid_usd: float | None = None
+    appraised_value_usd: float | None = None
+    # Second-offer / re-offer date when the first sale gets no sufficient bid.
+    sec_sale_date: date | None = None
     # Cross-source signal tagging — set by each scraper to categorize the
     # distress type (e.g. 'probate', 'tax_delinquent_foreclosure', 'land_bank_inventory').
     # Used downstream by the signal-stack join to count co-occurring distress signals.
