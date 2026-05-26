@@ -464,6 +464,44 @@ async def _dedup_cross_source_listings(pool: asyncpg.Pool) -> int:
         return 0
 
 
+async def _ensure_parcels_for_listings(pool: asyncpg.Pool) -> int:
+    """Guarantee every referenced parcel has a row in tranchi.parcels (all sources).
+
+    Many sources reference a parcel (source_listing_id) but don't persist it:
+    DLN mortgage listings arrive with an address (no MyPlace lookup), Land Bank
+    has no owner data, etc. Without a parcels row the listing can't be
+    independently cross-confirmed and parcel-keyed signals are FK-dropped. This
+    inserts a STUB row (parcel_number + the listing's address) for any live
+    listing whose parcel is missing. Owner/value/tax are filled later by the
+    enrich_parcels job (source_url='stub:listing' marks rows needing enrichment).
+    Probate upserts full owner data inline, so this mostly covers DLN/Land Bank.
+    Returns count of stubs created.
+    """
+    try:
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                INSERT INTO tranchi.parcels
+                    (parcel_number, situs_address, first_seen_at, last_seen_at, source_url)
+                SELECT DISTINCT ON (l.source_listing_id)
+                       l.source_listing_id, l.property_address, now(), now(), 'stub:listing'
+                FROM tranchi.listings l
+                LEFT JOIN tranchi.parcels p ON p.parcel_number = l.source_listing_id
+                WHERE l.source_listing_id IS NOT NULL AND l.source_listing_id <> ''
+                  AND l.status IN ('active', 'not_listed')
+                  AND p.parcel_number IS NULL
+                ON CONFLICT (parcel_number) DO NOTHING
+                """
+            )
+            count = int(result.split()[-1]) if result else 0
+            if count > 0:
+                logger.info("Parcel coverage: created %d stub parcel rows", count)
+            return count
+    except Exception as exc:
+        logger.warning("Parcel coverage step failed: %s", exc)
+        return 0
+
+
 async def _mark_expired_listings(pool: asyncpg.Pool) -> int:
     """Mark listings with past sale dates as 'expired'."""
     try:
@@ -551,10 +589,11 @@ async def main() -> int:
         if not args.dry_run and not args.site:
             delisted = await _mark_stale_listings(pool, results, run_start)
             expired = await _mark_expired_listings(pool)
+            stubs = await _ensure_parcels_for_listings(pool)
             dupes = await _dedup_cross_source_listings(pool)
             logger.info(
-                "Post-run: %d delisted, %d expired, %d dupes",
-                delisted, expired, dupes,
+                "Post-run: %d delisted, %d expired, %d parcel-stubs, %d dupes",
+                delisted, expired, stubs, dupes,
             )
 
         total_errors = sum(r.errors for r in results)

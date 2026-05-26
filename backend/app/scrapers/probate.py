@@ -87,7 +87,7 @@ from app.scrapers.models import RawListing
 from app.scrapers.proware_client import ProwareSession
 from app.scrapers.user_agents import random_ua
 from app.scrapers._time import today_et
-from app.scrapers.fiscal_officer import search_by_address, search_by_owner, ParcelMatch
+from app.scrapers.fiscal_officer import search_by_address, search_by_owner, ParcelMatch, upsert_parcels
 
 logger = logging.getLogger(__name__)
 
@@ -675,7 +675,25 @@ class ProbateScraper(ListingScraper):
                     )
                     all_listings.append(listing)
 
-                    # Write probate signal row (non-fatal if parcel not in registry)
+                    # Persist the matched parcel to the registry (owner+address were
+                    # already fetched via the MyPlace search) so the listing is
+                    # independently confirmable AND the probate signal's FK to
+                    # tranchi.parcels is satisfied THIS run (previously signals were
+                    # silently dropped when the parcel wasn't in the registry yet).
+                    if not self._dry_run:
+                        try:
+                            await upsert_parcels(self._pool, [{
+                                "parcel_number": match.parcel_number,
+                                "owner_name": match.owner_name,
+                                "situs_address": match.situs_address,
+                                "current_market_value": match.market_value,
+                                "tax_balance_due": match.tax_balance,
+                                "source_url": "https://myplace.cuyahogacounty.gov",
+                            }])
+                        except Exception as exc:
+                            logger.warning("parcel upsert failed for %s: %s", match.parcel_number, exc)
+
+                    # Write probate signal row (FK now satisfied by the upsert above)
                     await _upsert_probate_signal(
                         pool=self._pool,
                         parcel_number=parcel_number,
