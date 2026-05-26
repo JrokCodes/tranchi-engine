@@ -68,6 +68,7 @@ from app.scrapers.models import ScrapeResult  # noqa: E402
 from app.scrapers.prefilter import prefilter  # noqa: E402
 from app.scrapers.probate import ProbateScraper  # noqa: E402
 from app.scrapers.sheriff import SheriffSalesScraper  # noqa: E402
+from app.scrapers.staleness import full_rescan_sources  # noqa: E402
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Scraper registry
@@ -368,14 +369,19 @@ async def _mark_stale_listings(
 ) -> int:
     """Mark listings as 'not_listed' if not refreshed in this scrape cycle.
 
-    Only marks stale for sources where the scraper succeeded and found > 0.
+    Time-not-seen retirement ONLY applies to FULL_RESCAN sources (see
+    staleness.py). Cursor sources (probate) never re-visit old rows, so applying
+    this here would wrongly retire their entire back-catalog — they retire via the
+    periodic case_status re-check instead. Archive sources never go stale.
+    Only marks stale for FULL_RESCAN sources that succeeded and found > 0.
     """
     successful_sources = [
         r.source_site for r in results
         if r.found > 0 and r.errors == 0
     ]
+    successful_sources = full_rescan_sources(successful_sources)
     if not successful_sources:
-        logger.info("Stale detection: no successful scrapers, skipping.")
+        logger.info("Stale detection: no FULL_RESCAN sources to check, skipping.")
         return 0
 
     try:
