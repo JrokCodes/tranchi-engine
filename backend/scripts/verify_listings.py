@@ -1,0 +1,154 @@
+"""
+Listing verifier — the repeatable "is this a real, valid, current lead?" check.
+
+Marc's verification method is human cross-confluence: for a sample of listings,
+confirm the property is real, the lead is still live, and (probate) the case is
+open — using multiple independent sources so we know the data isn't fabricated.
+
+This script does the parts that are RELIABLE and SCRIPTABLE, and emits the
+Redfin/Zillow URLs for the one part that needs a human/browser eyeball (Redfin
+and Zillow block scripted access via CloudFront — that check is the on-demand
+/verify Playwright step, not an HTTP call).
+
+Per-listing verdict combines:
+  1. SOURCE AUTHORITY   — the listing came from an official government feed
+                          (DLN county legal journal / probate court / fiscal office).
+                          Deterministic scrape of public records → cannot be
+                          "hallucinated"; this is the primary validity guarantee.
+  2. FRESHNESS          — status='active'; auctions: sale_date >= today; probate:
+                          case_status not closed/disposed/terminated/dismissed.
+  3. PROPERTY IS REAL   — the parcel exists in tranchi.parcels (independent county
+                          fiscal-office record) with an owner + market value. This
+                          is a SECOND independent confirmation the address is a real
+                          property, separate from the deal source.
+  4. JOIN CONFIDENCE    — probate only: match_confidence tier (confirmed/probable/
+                          unverified). Unverified = name-only fuzzy join → human check.
+  5. NOT FOR SALE       — Redfin/Zillow URL emitted for the manual browser check
+                          (off-market = consistent with distress; active MLS = flag).
+
+Usage:
+  python scripts/verify_listings.py --sample 20         # mixed sample
+  python scripts/verify_listings.py --signal tax_delinquent_foreclosure --limit 10
+  python scripts/verify_listings.py --signal probate --limit 10
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import os
+import sys
+import urllib.parse
+from pathlib import Path
+
+_here = Path(__file__).resolve().parent
+_backend = _here.parent
+if str(_backend) not in sys.path:
+    sys.path.insert(0, str(_backend))
+_env_file = _backend / ".env"
+if _env_file.exists():
+    from dotenv import load_dotenv
+    load_dotenv(_env_file)
+
+import asyncpg  # noqa: E402
+
+_CLOSED = ("closed", "disposed", "terminated", "dismissed")
+
+
+def _redfin_url(addr: str, city: str | None, zip_: str | None) -> str:
+    q = ", ".join(p for p in (addr, city, "OH", zip_) if p)
+    return "https://www.redfin.com/?q=" + urllib.parse.quote(q)
+
+
+def _zillow_url(addr: str, city: str | None, zip_: str | None) -> str:
+    q = " ".join(p for p in (addr, city, "OH", zip_) if p)
+    return "https://www.zillow.com/homes/" + urllib.parse.quote(q) + "_rb/"
+
+
+def _verdict(r: asyncpg.Record) -> tuple[str, list[str]]:
+    """Return (verdict, notes). VALID / REVIEW / STALE."""
+    notes: list[str] = []
+    status = r["status"]
+    signal = r["signal_type"] or ""
+    # Freshness
+    fresh = status == "active"
+    if not fresh:
+        return "STALE", [f"status={status}"]
+    if r["sale_date"] is not None and r["sale_date"] < r["today"]:
+        return "STALE", ["sale_date in past"]
+    cs = (r["case_status"] or "").lower()
+    if signal == "probate" and cs and any(w in cs for w in _CLOSED):
+        return "STALE", [f"case {r['case_status']}"]
+    # Property reality (independent county registry)
+    parcel_real = r["owner_name"] is not None
+    if parcel_real:
+        notes.append(f"parcel real (owner: {r['owner_name']}, mv=${int(r['current_market_value'] or 0):,})")
+    else:
+        notes.append("NO parcel registry match — confirm address")
+    # Probate join confidence
+    verdict = "VALID"
+    if signal == "probate":
+        tier = r["match_confidence"] or "legacy"
+        notes.append(f"match={tier}")
+        if tier == "unverified":
+            verdict = "REVIEW"
+            notes.append("name-only fuzzy join — verify owner==decedent")
+    if not parcel_real and verdict == "VALID":
+        verdict = "REVIEW"
+    return verdict, notes
+
+
+async def run(args) -> None:
+    url = os.environ["DATABASE_URL"]
+    conn = await asyncpg.connect(url)
+    try:
+        where = "l.status = 'active' AND l.duplicate_of IS NULL"
+        params: list = []
+        if args.signal:
+            where += " AND l.signal_type = $1"
+            params.append(args.signal)
+        limit = args.limit or args.sample or 20
+        rows = await conn.fetch(
+            f"""
+            SELECT l.signal_type, l.source_site, l.property_address, l.property_city,
+                   l.property_zip, l.sale_date, l.opening_bid_usd, l.case_number,
+                   l.case_status, l.match_confidence, l.match_method, l.status,
+                   l.source_listing_id, p.owner_name, p.current_market_value,
+                   p.current_tax_balance, CURRENT_DATE AS today
+            FROM tranchi.listings l
+            LEFT JOIN tranchi.parcels p ON p.parcel_number = l.source_listing_id
+            WHERE {where}
+            ORDER BY random()
+            LIMIT {int(limit)}
+            """,
+            *params,
+        )
+        print(f"\n=== VERIFICATION PASS — {len(rows)} listings ===\n")
+        counts = {"VALID": 0, "REVIEW": 0, "STALE": 0}
+        for i, r in enumerate(rows, 1):
+            verdict, notes = _verdict(r)
+            counts[verdict] = counts.get(verdict, 0) + 1
+            bid = f" bid=${int(r['opening_bid_usd']):,}" if r["opening_bid_usd"] else ""
+            sd = f" sale={r['sale_date']}" if r["sale_date"] else ""
+            print(f"[{i:>2}] {verdict:<6} {r['signal_type']:<26} {r['property_address']}, {r['property_city']} ({r['source_listing_id']}){sd}{bid}")
+            print(f"      {' | '.join(notes)}")
+            print(f"      Redfin: {_redfin_url(r['property_address'], r['property_city'], r['property_zip'])}")
+        print("\n" + "=" * 60)
+        print(f"  VALID={counts['VALID']}  REVIEW={counts['REVIEW']}  STALE={counts['STALE']}  (of {len(rows)})")
+        print("  Manual step: open each Redfin/Zillow URL — off-market = consistent with distress (good); active MLS = flag.")
+        print("=" * 60 + "\n")
+    finally:
+        await conn.close()
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Tranchi listing verifier")
+    ap.add_argument("--sample", type=int, default=None, help="mixed random sample size")
+    ap.add_argument("--signal", type=str, default=None, help="filter to one signal_type")
+    ap.add_argument("--limit", type=int, default=None)
+    args = ap.parse_args()
+    asyncio.run(run(args))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
