@@ -66,20 +66,46 @@ async def _cursor(pool: asyncpg.Pool) -> int:
     return int(await pool.fetchval("SELECT last_id FROM tranchi.probate_cursor WHERE id = 1"))
 
 
+_CLOSED_WORDS = ("closed", "disposed", "terminated", "dismissed")
+
+
+def _is_closed(case_status: str) -> bool:
+    s = case_status.lower()
+    return any(w in s for w in _CLOSED_WORDS)
+
+
 async def _update_case_status(
     pool: asyncpg.Pool, case_number: str, case_status: str, status_date, dry_run: bool
 ) -> int:
-    """Write case_status onto every listing for this case. Returns rows touched."""
+    """Write case_status onto every listing for this case, and RETIRE closed cases.
+
+    A closed/disposed/terminated/dismissed estate is no longer a live lead — the
+    property has transferred. We flip its listings to status='expired' (excluded
+    from both the active deal view AND the cross-source dedup pool, so a closed row
+    can't become the canonical for a parcel and hide an open one). Open cases keep
+    their current status. Returns rows touched.
+    """
     if dry_run:
         return 0
-    result = await pool.execute(
-        """
-        UPDATE tranchi.listings
-        SET case_status = $2, case_status_date = $3
-        WHERE source_site = $4 AND case_number = $1
-        """,
-        case_number, case_status, status_date, _PROBATE_SITE,
-    )
+    if _is_closed(case_status):
+        result = await pool.execute(
+            """
+            UPDATE tranchi.listings
+            SET case_status = $2, case_status_date = $3, status = 'expired'
+            WHERE source_site = $4 AND case_number = $1
+              AND status IN ('active', 'not_listed')
+            """,
+            case_number, case_status, status_date, _PROBATE_SITE,
+        )
+    else:
+        result = await pool.execute(
+            """
+            UPDATE tranchi.listings
+            SET case_status = $2, case_status_date = $3
+            WHERE source_site = $4 AND case_number = $1
+            """,
+            case_number, case_status, status_date, _PROBATE_SITE,
+        )
     return int(result.split()[-1]) if result else 0
 
 
