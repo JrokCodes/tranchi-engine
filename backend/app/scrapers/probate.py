@@ -601,15 +601,18 @@ class ProbateScraper(ListingScraper):
                     case_number, decedent_name, dod, executor_name,
                 )
 
-                # ── Step 4: Dual-path parcel resolution ──────────────────────
-                # Path A (address_anchor): high-confidence home parcel via address.
-                # Path B (name_match): additional owned parcels via owner name.
-                # Dedupe by parcel_number — address_anchor wins on conflict.
+                # ── Step 4: Composite parcel resolution (name + address) ──────
+                # Two corroborating signals decide how trustworthy each
+                # parcel→decedent join is (see _classify_match):
+                #   • found by BOTH name and address search → composite/confirmed
+                #   • address only (precise home match)     → address_anchor/confirmed
+                #   • name only (fuzzy)                     → name_match/probable|unverified
+                # A name-only low-score join is the one real mis-join risk (common
+                # names attaching the wrong house). It is still emitted but
+                # tier-flagged 'unverified' so it never presents as a confirmed lead.
+                name_hits: dict[str, ParcelMatch] = {}
+                addr_hits: dict[str, ParcelMatch] = {}
 
-                # parcel_number → (ParcelMatch, join_method)
-                resolved: dict[str, tuple[ParcelMatch, str]] = {}
-
-                # Path B first so Path A can overwrite on conflict (address_anchor wins)
                 if decedent_name:
                     try:
                         name_matches = await search_by_owner(
@@ -624,14 +627,13 @@ class ProbateScraper(ListingScraper):
                             case_number, len(name_matches), decedent_name,
                         )
                         for m in name_matches:
-                            resolved[m.parcel_number] = (m, "name_match")
+                            name_hits[m.parcel_number] = m
                     except Exception as exc:
                         logger.warning(
                             "fiscal_officer.search_by_owner failed for %r (case %s): %s",
                             decedent_name, case_number, exc,
                         )
 
-                # Path A — address_anchor overwrites name_match for the home parcel
                 if decedent_address:
                     try:
                         addr_matches = await search_by_address(
@@ -643,42 +645,48 @@ class ProbateScraper(ListingScraper):
                             case_number, len(addr_matches), decedent_address,
                         )
                         for m in addr_matches:
-                            resolved[m.parcel_number] = (m, "address_anchor")
+                            addr_hits[m.parcel_number] = m
                     except Exception as exc:
                         logger.warning(
                             "fiscal_officer.search_by_address failed for %r (case %s): %s",
                             decedent_address, case_number, exc,
                         )
 
-                parcel_matches = [(match, method) for match, method in resolved.values()]
-
-                # ── Step 5: Emit RawListings ──────────────────────────────────
-                for match, join_method in parcel_matches:
+                # ── Step 5: Classify + emit one RawListing per unique parcel ───
+                for parcel_number in set(name_hits) | set(addr_hits):
+                    match, method, tier, score = _classify_match(
+                        name_hits.get(parcel_number),
+                        addr_hits.get(parcel_number),
+                    )
                     listing = _build_listing(
                         match=match,
                         case_number=case_number,
+                        case_status=summary_data.get("case_status"),
+                        case_status_date=summary_data.get("status_date"),
                         filing_date=filing_date,
                         decedent_name=decedent_name,
                         dod=dod,
                         executor_name=executor_name,
                         attorney_name=attorney_name,
                         probate_internal_id=current_id,
-                        join_method=join_method,
+                        match_method=method,
+                        match_confidence=tier,
+                        match_score=score,
                     )
                     all_listings.append(listing)
 
                     # Write probate signal row (non-fatal if parcel not in registry)
                     await _upsert_probate_signal(
                         pool=self._pool,
-                        parcel_number=match.parcel_number,
+                        parcel_number=parcel_number,
                         case_number=case_number,
                         decedent_name=decedent_name or "",
                         dod=dod,
-                        confidence=match.confidence,
+                        confidence=score,
                         dry_run=self._dry_run,
                     )
 
-                if not parcel_matches:
+                if not (name_hits or addr_hits):
                     logger.info(
                         "Case %s: no parcels found for decedent %r via either path "
                         "(likely renter or name/address mismatch)",
@@ -740,28 +748,56 @@ async def _get_page(session: ProwareSession, path: str, q_param: str) -> str:
 # RawListing builder
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _classify_match(
+    name_match: ParcelMatch | None,
+    addr_match: ParcelMatch | None,
+) -> tuple[ParcelMatch, str, str, float]:
+    """Decide join method + confidence tier from the corroborating signals.
+
+    Returns (match, method, tier, score). `match` is the ParcelMatch used to build
+    the listing (the address match is preferred when present — its situs is the
+    decedent's stated home, the most authoritative anchor).
+
+      both name + address  → ('composite',      'confirmed',  0.98)
+      address only         → ('address_anchor', 'confirmed',  max(conf, 0.95))
+      name only, conf≥0.90 → ('name_match',     'probable',   conf)
+      name only, conf<0.90 → ('name_match',     'unverified', conf)
+    """
+    if name_match is not None and addr_match is not None:
+        return addr_match, "composite", "confirmed", 0.98
+    if addr_match is not None:
+        return addr_match, "address_anchor", "confirmed", max(addr_match.confidence, 0.95)
+    # name-only (addr_match is None) — name_match is guaranteed non-None here
+    assert name_match is not None
+    score = name_match.confidence
+    tier = "probable" if score >= _HIGH_CONFIDENCE else "unverified"
+    return name_match, "name_match", tier, score
+
+
 def _build_listing(
     *,
     match: ParcelMatch,
     case_number: str,
+    case_status: str | None,
+    case_status_date: date | None,
     filing_date: date | None,
     decedent_name: str | None,
     dod: date | None,
     executor_name: str | None,
     attorney_name: str | None,
     probate_internal_id: int,
-    join_method: str = "name_match",
+    match_method: str,
+    match_confidence: str,
+    match_score: float,
 ) -> RawListing:
     """
     Build one RawListing from a ParcelMatch for a probate Estate case.
 
-    One listing per matched parcel. The parcel's situs_address becomes
-    the property_address; the executor becomes trustee_name.
-
-    join_method is stored in the listing metadata to indicate how the parcel
-    was resolved:
-      "address_anchor" — matched via decedent_address (high confidence, 0.95+)
-      "name_match"     — matched via decedent_name owner search (fuzzy, 0.75+)
+    One listing per matched parcel. The parcel's situs_address becomes the
+    property_address; the executor becomes trustee_name. case_status is stored so
+    the read API can keep only OPEN/PENDING cases in the deal view, and the match
+    tier (confirmed/probable/unverified) is stored so the frontend can badge
+    unverified joins instead of presenting them as confirmed leads.
     """
     # Property address comes from the fiscal_officer match (most reliable)
     address = match.situs_address or ""
@@ -784,6 +820,11 @@ def _build_listing(
         status="active",
         signal_type="probate",
         source_listing_id=match.parcel_number,
+        case_status=case_status or None,
+        case_status_date=case_status_date,
+        match_method=match_method,
+        match_confidence=match_confidence,
+        match_score=match_score,
     )
 
 

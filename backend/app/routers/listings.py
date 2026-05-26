@@ -66,6 +66,12 @@ class ListingItem(BaseModel):
     trustee_name: str | None
     case_number: str | None
     source_listing_id: str | None
+    # Probate validity + parcel→decedent join quality (null for non-probate).
+    case_status: str | None
+    case_status_date: date | None
+    match_method: str | None
+    match_confidence: str | None
+    match_score: float | None
     first_seen_at: datetime | None
     last_seen_at: datetime | None
     signal_count: int
@@ -208,6 +214,11 @@ def _row_to_item(r: asyncpg.Record) -> ListingItem:
         trustee_name=r["trustee_name"],
         case_number=r["case_number"],
         source_listing_id=r["source_listing_id"],
+        case_status=r["case_status"],
+        case_status_date=r["case_status_date"],
+        match_method=r["match_method"],
+        match_confidence=r["match_confidence"],
+        match_score=_to_float(r["match_score"]),
         first_seen_at=r["first_seen_at"],
         last_seen_at=r["last_seen_at"],
         signal_count=sig_count,
@@ -247,6 +258,11 @@ _BASE_SELECT = """
         l.trustee_name,
         l.case_number,
         l.source_listing_id,
+        l.case_status,
+        l.case_status_date,
+        l.match_method,
+        l.match_confidence,
+        l.match_score,
         l.first_seen_at,
         l.last_seen_at,
         COALESCE(sig.n, 0)              AS signal_count,
@@ -334,6 +350,17 @@ def _build_where(
         )
         params.append(signal_type)
         idx += 1
+
+    # Always-on probate validity gate (Marc's #1 rule: open cases only). A probate
+    # listing whose court case_status reads closed/disposed/terminated/dismissed is
+    # no longer a live lead — the estate is settled and the property has transferred.
+    # NULL case_status (not yet re-checked) stays visible until the backfill populates
+    # it. Non-probate listings are unaffected.
+    conditions.append(
+        "NOT (l.signal_type = 'probate' AND l.case_status IS NOT NULL AND ("
+        "l.case_status ILIKE '%closed%' OR l.case_status ILIKE '%disposed%' "
+        "OR l.case_status ILIKE '%terminated%' OR l.case_status ILIKE '%dismissed%'))"
+    )
 
     return conditions, params, idx
 

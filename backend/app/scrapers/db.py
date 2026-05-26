@@ -463,7 +463,12 @@ async def _upsert_one(
                 auction_status      = COALESCE($11, auction_status),
                 opening_bid_usd     = COALESCE($12, opening_bid_usd),
                 appraised_value_usd = COALESCE($13, appraised_value_usd),
-                sec_sale_date       = COALESCE($14, sec_sale_date)
+                sec_sale_date       = COALESCE($14, sec_sale_date),
+                case_status         = COALESCE($16, case_status),
+                case_status_date    = COALESCE($17, case_status_date),
+                match_method        = COALESCE($18, match_method),
+                match_confidence    = COALESCE($19, match_confidence),
+                match_score         = COALESCE($20, match_score)
             WHERE id = $15
             """,
             listing.deposit_usd,
@@ -481,6 +486,11 @@ async def _upsert_one(
             listing.appraised_value_usd,
             listing.sec_sale_date,
             existing_id,
+            listing.case_status,
+            listing.case_status_date,
+            listing.match_method,
+            listing.match_confidence,
+            listing.match_score,
         )
         return existing_id, False
 
@@ -492,14 +502,16 @@ async def _upsert_one(
             property_zip, sale_date, sale_time, sale_location,
             deposit_usd, trustee_name, status, normalized_address,
             signal_type, source_listing_id,
-            auction_status, opening_bid_usd, appraised_value_usd, sec_sale_date
+            auction_status, opening_bid_usd, appraised_value_usd, sec_sale_date,
+            case_status, case_status_date, match_method, match_confidence, match_score
         ) VALUES (
             $1,  $2,  $3,
             $4,  $5,  $6,
             $7,  $8,  $9,  $10,
             $11, $12, $13, $14,
             $15, $16,
-            $17, $18, $19, $20
+            $17, $18, $19, $20,
+            $21, $22, $23, $24, $25
         )
         RETURNING id
         """,
@@ -523,6 +535,11 @@ async def _upsert_one(
         listing.opening_bid_usd,
         listing.appraised_value_usd,
         listing.sec_sale_date,
+        listing.case_status,
+        listing.case_status_date,
+        listing.match_method,
+        listing.match_confidence,
+        listing.match_score,
     )
     return new_id, True
 

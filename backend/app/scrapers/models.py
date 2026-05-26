@@ -48,6 +48,18 @@ class RawListing(BaseModel):
     # from the upstream source. Stored alongside our internal case_number for
     # cross-referencing without normalization loss.
     source_listing_id: str | None = None
+    # Probate validity (NULL for non-probate sources). case_status is the court's
+    # verbatim case state (OPEN / PENDING / CLOSED / DISPOSED ...). Marc's #1 rule
+    # is "open cases only" — the read API filters closed cases out of the deal view.
+    case_status: str | None = None
+    case_status_date: date | None = None
+    # Parcel→decedent join quality (probate). match_method: 'address_anchor' |
+    # 'name_match' | 'composite'. match_confidence tier: 'confirmed' | 'probable' |
+    # 'unverified'. A name-only fuzzy join is the one real mis-join risk and must
+    # never present as confirmed — the frontend badges probable/unverified.
+    match_method: str | None = None
+    match_confidence: str | None = None
+    match_score: float | None = None
 
 
 class RawSignal(BaseModel):
