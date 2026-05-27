@@ -110,12 +110,18 @@ _AGREE_BUTTON = "ctl00$mpContentPH$btnYes"
 # Case category code for Estate (from field-map section A, verbatim)
 _ESTATE_CATEGORY = "EST"
 
-# How many consecutive IDs with no Estate case before we stop enumeration.
-# This prevents runaway runs when we reach the frontier of new filings.
+# Stop after this many consecutive TRULY-EMPTY (no-record) IDs — that marks the
+# frontier of assigned case IDs.
+# INVARIANT (do not regress): a real but non-Estate filing (ML/WIL/GDN/TRU…) does
+# NOT count toward this. Estate cases are interspersed with other case types and the
+# gap between consecutive EST cases routinely exceeds 25, so counting non-estate
+# cases as "misses" froze the cursor for days (May 2026 bug). Only empty IDs (a
+# None from _parse_case_summary) signal the frontier; non-estate sentinels reset it.
 _DEFAULT_MAX_CONSECUTIVE_MISS = 25
 
 # Hard cap on IDs explored per run. Overridden by PROBATE_MAX_IDS env var.
-_DEFAULT_MAX_IDS = 200
+# 500 (not 200) so a single run can catch up a multi-day backlog after being behind.
+_DEFAULT_MAX_IDS = 500
 
 # Minimum fiscal_officer confidence to emit a listing
 _MIN_CONFIDENCE = 0.75
@@ -223,7 +229,10 @@ def _parse_case_summary(html: str) -> dict[str, Any] | None:
 
     if category_code != _ESTATE_CATEGORY:
         logger.debug("Non-estate case %s (cat=%s) — skipping", case_number, category_code)
-        return None
+        # A real case exists at this ID, just not an Estate. Return a SENTINEL (not
+        # None) so the cursor walk knows it has NOT hit the empty frontier and keeps
+        # going. Only truly empty / no-record IDs return None (the frontier signal).
+        return {"_non_estate": True, "category_code": category_code, "case_number": case_number}
 
     case_title = _find_field("Case Title") or ""
     case_type = _find_field("Case Type") or ""
@@ -490,7 +499,9 @@ class ProbateScraper(ListingScraper):
                     RawListings are still returned for prefilter inspection.
         max_ids:    Hard cap on IDs to explore this run. Env var
                     PROBATE_MAX_IDS overrides this. Default 200.
-        max_consecutive_miss: Stop after this many non-Estate IDs in a row.
+        max_consecutive_miss: Stop after this many consecutive EMPTY (no-record) IDs
+            in a row (the frontier). Non-estate filings do NOT count — see the
+            constant's invariant note.
     """
 
     site_name = "Cuyahoga Probate Court"
@@ -565,13 +576,21 @@ class ProbateScraper(ListingScraper):
                     continue
 
                 if summary_data is None:
-                    # Not an Estate case (or no case at this ID)
-                    logger.debug("ID %d: no Estate case found (miss %d/%d)", current_id, consecutive_miss + 1, self._max_consecutive_miss)
+                    # Truly empty / no-record ID — this marks the frontier of assigned
+                    # case IDs. Count consecutive empties; stop once we've seen enough.
                     consecutive_miss += 1
+                    logger.debug("ID %d: empty (frontier %d/%d)", current_id, consecutive_miss, self._max_consecutive_miss)
                     current_id += 1
                     continue
 
-                # Reset miss counter — we found a valid Estate case
+                if summary_data.get("_non_estate"):
+                    # A real non-estate filing (ML/WIL/GDN/TRU…). NOT the frontier —
+                    # reset the empty counter and keep walking toward the next estate case.
+                    consecutive_miss = 0
+                    current_id += 1
+                    continue
+
+                # Estate case — reset the frontier counter and process it.
                 consecutive_miss = 0
                 case_number = summary_data["case_number"]
                 filing_date = summary_data.get("filing_date")

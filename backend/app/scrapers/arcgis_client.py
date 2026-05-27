@@ -34,6 +34,39 @@ _RETRY_LIMIT = 3
 _RETRY_BACKOFF = 2.0  # seconds, doubles each retry
 
 
+async def _get_arcgis_json(
+    client: httpx.AsyncClient, url: str, params: dict[str, str]
+) -> dict:
+    """GET an ArcGIS /query endpoint and return parsed JSON, retrying transient failures.
+
+    INVARIANT: ArcGIS FeatureServers return application-level errors as HTTP 200 with an
+    `{'error': {...}}` body (e.g. {'code': 400, 'message': 'Invalid URL'}) — NOT as an
+    HTTP status code. These are frequently transient (a momentary service reload / route
+    hiccup; the identical query succeeds seconds later). So we treat BOTH network/HTTP
+    errors AND an ArcGIS error-body as retryable, inside one backoff loop, so a single
+    glitch doesn't drop the whole source for a cycle. Raises after _RETRY_LIMIT attempts
+    (a genuinely persistent error still fails loud).
+    """
+    for attempt in range(1, _RETRY_LIMIT + 1):
+        try:
+            resp = await client.get(url, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+            if "error" in data:
+                raise RuntimeError(f"ArcGIS error: {data['error']}")
+            return data
+        except Exception as exc:
+            if attempt == _RETRY_LIMIT:
+                logger.error("ArcGIS query failed after %d attempts: %s", _RETRY_LIMIT, exc)
+                raise
+            wait = _RETRY_BACKOFF * attempt
+            logger.warning(
+                "ArcGIS query attempt %d failed: %s — retrying in %.1fs", attempt, exc, wait,
+            )
+            await asyncio.sleep(wait)
+    raise RuntimeError("unreachable")  # pragma: no cover
+
+
 async def count_features(
     feature_server_url: str,
     where: str = "1=1",
@@ -60,11 +93,7 @@ async def count_features(
         params.update(extra_params)
 
     async with httpx.AsyncClient(headers=default_headers(), timeout=_REQUEST_TIMEOUT) as client:
-        resp = await client.get(f"{feature_server_url}/query", params=params)
-        resp.raise_for_status()
-        data = resp.json()
-        if "error" in data:
-            raise ValueError(f"ArcGIS error: {data['error']}")
+        data = await _get_arcgis_json(client, f"{feature_server_url}/query", params)
         return data.get("count", 0)
 
 
@@ -108,32 +137,7 @@ async def query_features(
             if extra_params:
                 params.update(extra_params)
 
-            resp_data: dict | None = None
-            for attempt in range(1, _RETRY_LIMIT + 1):
-                try:
-                    resp = await client.get(query_url, params=params)
-                    resp.raise_for_status()
-                    resp_data = resp.json()
-                    break
-                except (httpx.HTTPError, Exception) as exc:
-                    if attempt == _RETRY_LIMIT:
-                        logger.error(
-                            "ArcGIS query failed after %d attempts at offset %d: %s",
-                            _RETRY_LIMIT, offset, exc,
-                        )
-                        raise
-                    wait = _RETRY_BACKOFF * attempt
-                    logger.warning(
-                        "ArcGIS query attempt %d failed (offset=%d): %s — retrying in %.1fs",
-                        attempt, offset, exc, wait,
-                    )
-                    await asyncio.sleep(wait)
-
-            if resp_data is None:
-                break
-
-            if "error" in resp_data:
-                raise ValueError(f"ArcGIS error at offset {offset}: {resp_data['error']}")
+            resp_data = await _get_arcgis_json(client, query_url, params)
 
             features = resp_data.get("features", [])
             if not features:
