@@ -63,6 +63,10 @@ _LANDBANK_URL = "https://cuyahogalandbank.org/all-available-properties/"
 _MYPLACE_BASE = "https://myplace.cuyahogacounty.gov"
 _PROBATE_FRESHNESS_MAX_DAYS = 14  # case_status considered "fresh" if seen within this window
 
+# Telegram alerting — same shared @intelleq_monitor_bot as quality_audit / audit_scrapers.
+_TELEGRAM_TOKEN_PATH = Path("/home/ubuntu/.secrets/tranchi/telegram-bot-token")
+_TELEGRAM_CHAT_ID = "8360510944"  # @intelleq_monitor_bot
+
 
 def _b64(s: str) -> str:
     return base64.b64encode(s.encode()).decode()
@@ -189,8 +193,20 @@ async def verify_probate(row: dict) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def verify_myplace(client: httpx.AsyncClient, row: dict) -> dict:
+    """Cross-check the stored parcel record against the live MyPlace page.
+
+    Three signals (any FAIL → FAIL):
+      1. parcel number appears on the live page (proves the URL didn't redirect/error)
+      2. owner_name leading token (last name) appears on the page
+      3. situs_address (if stored) substantially matches the live page (street + number)
+
+    A stricter MyPlace check than just owner-token: catches address drift between
+    our stored row and the live county record (e.g., the parcel got re-platted, or
+    we recorded a wrong situs at upsert time).
+    """
     parcel = (row.get("source_listing_id") or "").strip()
     expected_owner = (row.get("owner_name") or "").strip()
+    expected_situs = (row.get("situs_address") or "").strip()
     if not parcel:
         return {"verdict": "FAIL", "evidence": "no parcel"}
     try:
@@ -198,17 +214,38 @@ async def verify_myplace(client: httpx.AsyncClient, row: dict) -> dict:
                              headers={"User-Agent": "Mozilla/5.0"})
         if r.status_code != 200:
             return {"verdict": "FAIL", "evidence": f"MyPlace status={r.status_code}"}
-        html = r.text
+        html_upper = r.text.upper()
+
+        # 1. Parcel number must appear (else the page redirected away)
+        if parcel not in r.text:
+            return {"verdict": "FAIL", "evidence": f"parcel {parcel} not on live MyPlace page"}
+
+        signals: list[str] = []
+
+        # 2. Owner token check
         if expected_owner:
-            # Compare the leading token of the owner string (last name) to the page
             first_token = expected_owner.split(",")[0].strip().split(" ")[0].upper()
-            if first_token and first_token in html.upper():
-                return {"verdict": "PASS", "evidence": f"MyPlace shows owner containing '{first_token}'"}
-            return {"verdict": "FAIL", "evidence": f"MyPlace loaded but owner token '{first_token}' not on page"}
-        # No expected owner stored — check parcel string itself
-        if parcel in html:
-            return {"verdict": "PASS", "evidence": f"MyPlace shows parcel {parcel}"}
-        return {"verdict": "FAIL", "evidence": "MyPlace loaded but parcel string not visible"}
+            if first_token and first_token in html_upper:
+                signals.append(f"owner '{first_token}' ✓")
+            else:
+                return {"verdict": "FAIL",
+                        "evidence": f"parcel ✓ but owner token '{first_token}' missing on live page"}
+
+        # 3. Situs address — compare leading numeric token (house number) + first 4 chars
+        #    of street name. Tolerant of suffix variations (St vs Street) and case.
+        if expected_situs:
+            stoks = re.findall(r"[A-Z0-9]+", expected_situs.upper())
+            if stoks:
+                num_token = next((t for t in stoks if t.isdigit()), None)
+                street_token = next((t for t in stoks if not t.isdigit()), None)
+                if num_token and street_token:
+                    if num_token in html_upper and street_token[:5] in html_upper:
+                        signals.append(f"situs '{num_token} {street_token[:5]}…' ✓")
+                    else:
+                        return {"verdict": "FAIL",
+                                "evidence": f"parcel + owner ✓ but situs '{num_token} {street_token[:8]}' missing"}
+
+        return {"verdict": "PASS", "evidence": "MyPlace live: " + ", ".join(signals or ["parcel ✓"])}
     except Exception as e:
         return {"verdict": "ERROR", "evidence": f"MyPlace fetch error: {str(e)[:80]}"}
 
@@ -262,7 +299,8 @@ async def _sample_rows(conn: asyncpg.Connection, *, sample: int, signal: str | N
         rows = await conn.fetch(
             """
             SELECT l.id, l.signal_type, l.source_listing_id, l.property_address, l.property_city,
-                   l.case_number, l.case_status, l.last_seen_at, p.owner_name
+                   l.case_number, l.case_status, l.last_seen_at,
+                   p.owner_name, p.situs_address
             FROM tranchi.listings l LEFT JOIN tranchi.parcels p ON p.parcel_number = l.source_listing_id
             WHERE l.source_listing_id = ANY($1) AND l.status='active' AND l.duplicate_of IS NULL
             """,
@@ -278,7 +316,8 @@ async def _sample_rows(conn: asyncpg.Connection, *, sample: int, signal: str | N
     rows = await conn.fetch(
         f"""
         SELECT l.id, l.signal_type, l.source_listing_id, l.property_address, l.property_city,
-               l.case_number, l.case_status, l.last_seen_at, p.owner_name
+               l.case_number, l.case_status, l.last_seen_at,
+               p.owner_name, p.situs_address
         FROM tranchi.listings l LEFT JOIN tranchi.parcels p ON p.parcel_number = l.source_listing_id
         WHERE {where}
         ORDER BY random() LIMIT {int(n)}
@@ -331,9 +370,53 @@ async def run(args) -> int:
                 if r["combined"] == "FAIL":
                     print(f"    {r['id']} -- {r['address']} ({r['parcel']}) — {r['source_evidence']}")
         print("=" * 70 + "\n")
+
+        # Telegram alert on any FAIL/ERROR (off if --no-alert)
+        if not args.no_alert:
+            msg = _format_telegram_alert(results, elapsed)
+            if msg:
+                _send_telegram(msg)
         return 0
     finally:
         await conn.close()
+
+
+def _send_telegram(message: str) -> None:
+    """Best-effort Telegram alert. Same graceful-no-op pattern as quality_audit.py."""
+    if not _TELEGRAM_TOKEN_PATH.exists():
+        logger.info("Telegram token not at %s — alert suppressed.", _TELEGRAM_TOKEN_PATH)
+        return
+    try:
+        token = _TELEGRAM_TOKEN_PATH.read_text().strip()
+        r = httpx.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": _TELEGRAM_CHAT_ID, "text": message},
+            timeout=10,
+        )
+        r.raise_for_status()
+        logger.info("Telegram alert sent.")
+    except Exception as exc:
+        logger.error("Telegram send failed (non-fatal): %s", exc)
+
+
+def _format_telegram_alert(results: list[dict], elapsed: float) -> str:
+    fails = [r for r in results if r["combined"] == "FAIL"]
+    errs = [r for r in results if r["combined"] == "ERROR"]
+    if not fails and not errs:
+        return ""
+    lines = [
+        "*Tranchi source-check — FAIL(s) detected*",
+        f"_{len(fails)} FAIL, {len(errs)} ERROR of {len(results)} ({elapsed:.1f}s)_",
+        "",
+    ]
+    for r in (fails + errs)[:12]:
+        lines.append(f"• `{r['signal_type']}` {r['address']} ({r['parcel']})")
+        lines.append(f"    {r['source_evidence']}")
+        if r['myplace_verdict'] != 'PASS':
+            lines.append(f"    MyPlace: {r['myplace_evidence']}")
+    if len(fails) + len(errs) > 12:
+        lines.append(f"...and {len(fails) + len(errs) - 12} more")
+    return "\n".join(lines)
 
 
 def main() -> int:
@@ -344,6 +427,7 @@ def main() -> int:
     ap.add_argument("--parcels", nargs="*", default=None)
     ap.add_argument("--concurrency", type=int, default=5)
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--no-alert", action="store_true", help="Skip Telegram alert on FAIL")
     args = ap.parse_args()
     return asyncio.run(run(args))
 
