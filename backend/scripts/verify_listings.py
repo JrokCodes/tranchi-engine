@@ -221,20 +221,41 @@ def _layers(r: asyncpg.Record) -> dict:
         first_seen_label = f"{int(r['lead_age_days'])} days ago"
 
     if sig == "probate":
+        filing_year = None
+        if case and len(case) >= 4 and case[:4].isdigit():
+            filing_year = int(case[:4])
+        match_method = r["match_method"] or ""
+        match_conf = r["match_confidence"] or "legacy"
+        is_uncertain_join = (
+            match_method == "" or match_conf in ("unverified", "legacy", None)
+        )
+        candidate_decedent_label = (
+            f"{r['owner_name'] or '—'} (name-fuzzy match — verify on ProWare)"
+            if is_uncertain_join
+            else (r["owner_name"] or "—")
+        )
         layer1 = {
             "title": "Cuyahoga Probate Court — ProWare",
             "url": "https://probate.cuyahogacounty.gov/pa/",
-            "search_for": f"Click 'Case Search', accept terms, paste case number: {case or '?'}",
+            "search_for": (
+                "From the landing page, accept the disclaimer, then choose 'Case Search' "
+                "(NOT 'Docket and Index Search' — that's a name-fuzzy box and will return wrong results). "
+                f"Case Type: Estate. Paste {case or '?'} into the Case Number field."
+            ),
             "look_for": (
                 "Case Status must say OPEN or PENDING (not Closed / Disposed / Terminated / Dismissed). "
-                "Filing date should be a recent year (the case_number prefix is the filing year). "
-                "If the case is closed, our weekly probate_recheck cron will retire it; if it didn't, escalate."
+                f"Filing year on the page should be {filing_year if filing_year else '(unknown — case# malformed)'}. "
+                "Decedent name on the case page is the single source of truth — if the parcel owner below "
+                "doesn't match the decedent name, this is a mis-joined row (REVIEW, not a real lead). "
+                "Click 'Parties' on the case page to confirm the decedent."
             ),
             "stored": [
                 ("Case Number", case or "—"),
+                ("Filing Year", str(filing_year) if filing_year else "—"),
                 ("Case Status (our copy)", r["case_status"] or "—"),
-                ("Match Method", r["match_method"] or "—"),
-                ("Match Confidence", r["match_confidence"] or "legacy"),
+                ("Candidate Decedent (parcel owner)", candidate_decedent_label),
+                ("Match Method", match_method or "(legacy / pre-tiering)"),
+                ("Match Confidence", match_conf),
                 ("First Seen By Us", first_seen_label),
             ],
         }
