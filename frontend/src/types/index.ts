@@ -58,6 +58,8 @@ export interface ApiListingItem {
   current_market_value: number | null;
   current_tax_balance: number | null;
   delinquent_flag: boolean;
+  // Google Street View image URL (null when no Maps key / no coverage).
+  street_view_url: string | null;
 }
 
 export interface ListingsResponse {

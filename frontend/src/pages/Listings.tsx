@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { AnimatePresence, motion } from 'framer-motion';
-import { ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Flame } from 'lucide-react';
+import { ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Flame, MapPin } from 'lucide-react';
 import { FilterBar, defaultFilters, type FilterState } from '../components/FilterBar';
 import { DetailDrawer } from '../components/DetailDrawer';
 import { StatusBadge } from '../components/shared/StatusBadge';
@@ -19,6 +19,7 @@ import type { ApiListingItem } from '../types';
 // ─── Table columns ─────────────────────────────────────────────────────────────
 
 const COLUMNS = [
+  { key: 'thumb', label: '', sortable: false, width: 'w-20' },
   { key: 'property_address', label: 'Address', sortable: true, width: 'min-w-[200px]' },
   { key: 'property_city', label: 'City', sortable: false, width: 'w-32' },
   { key: 'source_site', label: 'Source', sortable: false, width: 'w-32' },
@@ -269,6 +270,27 @@ interface RowProps {
   onClick: () => void;
 }
 
+// Small street-view thumbnail with a graceful MapPin fallback (no key / no coverage).
+function ListingThumb({ url }: { url: string | null }) {
+  const [imgError, setImgError] = useState(false);
+  if (!url || imgError) {
+    return (
+      <div className="h-10 w-14 rounded-md bg-(--color-bg-elevated) flex items-center justify-center">
+        <MapPin size={14} className="text-(--color-muted)" />
+      </div>
+    );
+  }
+  return (
+    <img
+      src={url}
+      alt=""
+      loading="lazy"
+      onError={() => setImgError(true)}
+      className="h-10 w-14 rounded-md object-cover bg-(--color-bg-elevated)"
+    />
+  );
+}
+
 function ListingRow({ item, index, onClick }: RowProps) {
   return (
     <motion.tr
@@ -278,6 +300,11 @@ function ListingRow({ item, index, onClick }: RowProps) {
       onClick={onClick}
       className="border-b border-(--color-border-subtle) h-14 cursor-pointer hover:bg-(--color-bg-subtle) transition-colors group"
     >
+      {/* Thumbnail */}
+      <td className="pl-4 pr-1">
+        <ListingThumb url={item.street_view_url} />
+      </td>
+
       {/* Address + county */}
       <td className="px-4">
         <p className="text-[13px] font-medium text-(--color-ink) group-hover:text-(--color-navy) transition-colors truncate max-w-[240px]">

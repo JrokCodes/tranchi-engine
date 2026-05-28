@@ -29,6 +29,15 @@ class Settings(BaseSettings):
     # ── CORS ─────────────────────────────────────────────────────────────────
     CORS_ORIGINS: str = "http://localhost:5173,http://localhost:3000"
 
+    # ── External APIs ─────────────────────────────────────────────────────────
+    # Google Maps Static API key (Street View Static API). Used to build
+    # deterministic property-image URLs from the address at response time — no
+    # storage, no geocoding. Empty key → street_view_url returns None and the UI
+    # shows a placeholder. The key ends up embedded in image URLs visible to the
+    # browser, so it MUST be HTTP-referrer-restricted to the tranchi hostname in
+    # the Google Cloud console.
+    GOOGLE_MAPS_API_KEY: str = ""
+
     # ── Feature flags ─────────────────────────────────────────────────────────
     DEBUG: bool = False
 

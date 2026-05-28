@@ -27,6 +27,7 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 from app.database import get_db
+from app.services.streetview import build_street_view_url
 
 router = APIRouter()
 limiter = Limiter(key_func=get_remote_address)
@@ -84,6 +85,9 @@ class ListingItem(BaseModel):
     current_market_value: float | None
     current_tax_balance: float | None
     delinquent_flag: bool
+    # Google Street View Static API URL, built on the fly from the address.
+    # None when GOOGLE_MAPS_API_KEY is unset → frontend shows a placeholder.
+    street_view_url: str | None = None
 
 
 class ListingPage(BaseModel):
@@ -230,6 +234,12 @@ def _row_to_item(r: asyncpg.Record) -> ListingItem:
         current_market_value=_to_float(r["current_market_value"]),
         current_tax_balance=_to_float(r["current_tax_balance"]),
         delinquent_flag=bool(r["delinquent_flag"]) if r["delinquent_flag"] is not None else False,
+        street_view_url=build_street_view_url(
+            address=r["property_address"],
+            city=r["property_city"],
+            state=r["property_state"],
+            zip_code=r["property_zip"],
+        ),
     )
 
 

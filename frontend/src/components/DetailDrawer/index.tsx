@@ -1,6 +1,6 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { X, AlertTriangle, Flame } from 'lucide-react';
+import { X, AlertTriangle, Flame, MapPin } from 'lucide-react';
 import { useListing } from '../../hooks/useListings';
 import { StatusBadge } from '../shared/StatusBadge';
 import {
@@ -34,6 +34,30 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
     <p className="text-[10px] uppercase tracking-[0.14em] text-(--color-muted) font-semibold mb-2.5">
       {children}
     </p>
+  );
+}
+
+// ─── Street View hero ───────────────────────────────────────────────────────
+// 16:9 property image at the top of the drawer. Falls back to a MapPin tile when
+// there's no Maps key or Google has no Street View coverage for the address.
+function StreetViewHero({ url, address }: { url: string; address: string }) {
+  const [imgError, setImgError] = useState(false);
+  if (imgError) {
+    return (
+      <div className="rounded-xl overflow-hidden aspect-[16/9] bg-(--color-bg-elevated) flex items-center justify-center">
+        <MapPin size={32} className="text-(--color-muted)" />
+      </div>
+    );
+  }
+  return (
+    <div className="rounded-xl overflow-hidden aspect-[16/9] bg-(--color-bg-elevated)">
+      <img
+        src={url}
+        alt={`Street view of ${address}`}
+        className="w-full h-full object-cover"
+        onError={() => setImgError(true)}
+      />
+    </div>
   );
 }
 
@@ -95,6 +119,13 @@ function DrawerContent({ listingId, onClose }: { listingId: string; onClose: () 
           <X size={14} />
           Close
         </button>
+
+        {/* Street View hero */}
+        {listing.street_view_url && (
+          <div className="mb-4">
+            <StreetViewHero url={listing.street_view_url} address={listing.property_address} />
+          </div>
+        )}
 
         <div className="flex items-start gap-3">
           <div className="flex-1 min-w-0">
