@@ -220,6 +220,7 @@ class DLNScraper(ListingScraper):
         out: list[dict[str, Any]] = []
         total_pages = _MAX_PAGES
         page = 1
+        scan_complete = False          # only True when we reach the real end of the feed
         while page <= min(total_pages, _MAX_PAGES):
             params: dict[str, Any] = {
                 "page": page,
@@ -232,22 +233,36 @@ class DLNScraper(ListingScraper):
                 params["meta_key"] = meta_key
             data = await _get_json(client, params)
             if not data:
-                break
+                break                  # fetch failure → scan_complete stays False (flagged below)
             total_pages = int(data.get("total_pages") or total_pages)
             rows = data.get("data") or []
             if not rows:
+                scan_complete = True
                 break
             for rec in rows:
                 acf = rec.get("acf") or {}
                 sd = _parse_mdy(acf.get("sale_date"))
+                # INVARIANT (see module docstring): FILTER here, never break. The feed's
+                # sale_date order is LEXICAL ("6/3" sorts after "6/10"), so a past date on
+                # this row says NOTHING about later rows — an early break silently drops
+                # future leads. A full scan to total_pages is mandatory.
                 if sd and sd >= today:
                     out.append(acf)
             if page >= total_pages:
+                scan_complete = True
                 break
             page += 1
             await asyncio.sleep(_INTER_PAGE_DELAY)
         if page >= _MAX_PAGES:
             logger.warning("DLN %s: hit _MAX_PAGES ceiling (%d) — feed may be undercounted", feed_type, _MAX_PAGES)
+        elif not scan_complete:
+            # Guards against a regression (early-stop) or a mid-scan fetch failure leaving
+            # the upcoming-sales list truncated. Loud because it means missing future leads.
+            logger.error(
+                "DLN %s: feed scan ended early at page %d/%d — upcoming sales may be "
+                "MISSING (LEXICAL sort invariant; full scan required).",
+                feed_type, page, total_pages,
+            )
         logger.info("DLN %s: %d upcoming rows (sale_date >= %s)", feed_type, len(out), today)
         return out
 

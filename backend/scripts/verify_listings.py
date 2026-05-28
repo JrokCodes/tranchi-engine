@@ -64,6 +64,53 @@ def _zillow_url(addr: str, city: str | None, zip_: str | None) -> str:
     return "https://www.zillow.com/homes/" + urllib.parse.quote(q) + "_rb/"
 
 
+def _myplace_url(parcel: str | None) -> str:
+    # Cuyahoga MyPlace: the search box accepts a parcel number. Base URL takes you
+    # to the search; paste the parcel to land on the authoritative county record.
+    if not parcel:
+        return "https://myplace.cuyahogacounty.gov/"
+    return f"https://myplace.cuyahogacounty.gov/?parcel={urllib.parse.quote(parcel)}"
+
+
+def _source_and_check(r: asyncpg.Record) -> tuple[str, str]:
+    """Return (source_confirmation_url, what-to-check). Per-signal-type.
+
+    Verification logic:
+      probate                       — court case is the source of truth (must still be
+                                      OPEN). Parcel + owner on MyPlace confirm the property.
+      tax_delinquent_foreclosure    — DLN legal-notice journal published the sale;
+                                      MyPlace confirms parcel + delinquency.
+      mortgage_foreclosure          — DLN published the sheriff sale; MyPlace confirms parcel.
+      land_bank_inventory           — Cuyahoga Land Bank inventory page; still listed = active.
+    """
+    sig = (r["signal_type"] or "")
+    parcel = r["source_listing_id"]
+    case = r["case_number"]
+    addr_status = r["address_status"]
+    addr_hint = ("verify by PARCEL #, not address (vacant/unnumbered)"
+                 if addr_status == "no_street_number" else "address should match")
+
+    if sig == "probate":
+        src = f"https://probate.cuyahogacounty.gov/pa/   (search case {case or '?'})"
+        chk = (f"(1) ProWare case {case or '?'} still says OPEN  "
+               f"(2) MyPlace parcel {parcel} owner matches  "
+               f"(3) Redfin/Zillow off-market = good  -- {addr_hint}")
+    elif sig in ("tax_delinquent_foreclosure", "mortgage_foreclosure"):
+        src = f"https://www.dln.com/   (search '{case or parcel or ''}' or by sale_date)"
+        chk = (f"(1) DLN legal notice still lists sale_date={r['sale_date']}  "
+               f"(2) MyPlace parcel {parcel} exists + delinquency present  "
+               f"(3) Redfin/Zillow off-market = good  -- {addr_hint}")
+    elif sig == "land_bank_inventory":
+        src = "https://landbank.cuyahogalandbank.org/   (property inventory)"
+        chk = (f"(1) Land Bank still lists this property  "
+               f"(2) MyPlace parcel {parcel} confirms address  "
+               f"(3) Redfin/Zillow off-market = expected (county-owned)  -- {addr_hint}")
+    else:
+        src = "https://myplace.cuyahogacounty.gov/"
+        chk = f"(1) MyPlace parcel {parcel} exists  (2) Redfin/Zillow check  -- {addr_hint}"
+    return src, chk
+
+
 def _verdict(r: asyncpg.Record) -> tuple[str, list[str]]:
     """Return (verdict, notes). VALID / REVIEW / STALE."""
     notes: list[str] = []
@@ -106,13 +153,14 @@ async def run(args) -> None:
         if args.signal:
             where += " AND l.signal_type = $1"
             params.append(args.signal)
-        limit = args.limit or args.sample or 20
+        limit = args.limit or args.sample or 15
         rows = await conn.fetch(
             f"""
             SELECT l.signal_type, l.source_site, l.property_address, l.property_city,
                    l.property_zip, l.sale_date, l.opening_bid_usd, l.case_number,
                    l.case_status, l.match_confidence, l.match_method, l.status,
-                   l.source_listing_id, p.owner_name, p.current_market_value,
+                   l.source_listing_id, l.address_status,
+                   p.owner_name, p.current_market_value,
                    p.current_tax_balance, CURRENT_DATE AS today
             FROM tranchi.listings l
             LEFT JOIN tranchi.parcels p ON p.parcel_number = l.source_listing_id
@@ -129,13 +177,19 @@ async def run(args) -> None:
             counts[verdict] = counts.get(verdict, 0) + 1
             bid = f" bid=${int(r['opening_bid_usd']):,}" if r["opening_bid_usd"] else ""
             sd = f" sale={r['sale_date']}" if r["sale_date"] else ""
+            src_url, check = _source_and_check(r)
             print(f"[{i:>2}] {verdict:<6} {r['signal_type']:<26} {r['property_address']}, {r['property_city']} ({r['source_listing_id']}){sd}{bid}")
             print(f"      {' | '.join(notes)}")
-            print(f"      Redfin: {_redfin_url(r['property_address'], r['property_city'], r['property_zip'])}")
-        print("\n" + "=" * 60)
+            print(f"      Redfin:  {_redfin_url(r['property_address'], r['property_city'], r['property_zip'])}")
+            print(f"      Zillow:  {_zillow_url(r['property_address'], r['property_city'], r['property_zip'])}")
+            print(f"      MyPlace: {_myplace_url(r['source_listing_id'])}")
+            print(f"      Source:  {src_url}")
+            print(f"      CHECK:   {check}")
+        print("\n" + "=" * 70)
         print(f"  VALID={counts['VALID']}  REVIEW={counts['REVIEW']}  STALE={counts['STALE']}  (of {len(rows)})")
-        print("  Manual step: open each Redfin/Zillow URL — off-market = consistent with distress (good); active MLS = flag.")
-        print("=" * 60 + "\n")
+        print("  Manual step: open each Redfin/Zillow link — off-market = consistent with distress (good); active MLS = flag.")
+        print("  Confirm at SOURCE: each row's Source URL (court case OPEN / DLN sale still scheduled / Land Bank still listed).")
+        print("=" * 70 + "\n")
     finally:
         await conn.close()
 

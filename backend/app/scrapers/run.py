@@ -523,6 +523,52 @@ async def _mark_expired_listings(pool: asyncpg.Pool) -> int:
         return 0
 
 
+async def _flag_incomplete_addresses(pool: asyncpg.Pool) -> int:
+    """Tag active listings whose address has no leading house number.
+
+    Verified 2026-05-28: these are NOT parse bugs and are NOT recoverable. The
+    county's own MyPlace situs for the same parcel also lacks a number, and the
+    dominant land_use_code is 5000 (residential vacant land) with developer-LLC
+    owners. A vacant lot has no structure, so the county assigns no street number.
+    They stay in the feed (valid land deals); the tag tells the UI / verifier to
+    confirm them by PARCEL NUMBER on MyPlace, not by street address. Returns the
+    count currently flagged.
+    """
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE tranchi.listings
+                SET address_status = 'no_street_number'
+                WHERE status IN ('active', 'not_listed')
+                  AND property_address !~ '^[[:space:]]*[0-9]'
+                  AND address_status IS DISTINCT FROM 'no_street_number'
+                """
+            )
+            # Clear the flag if a listing later gains a numbered address.
+            await conn.execute(
+                """
+                UPDATE tranchi.listings
+                SET address_status = NULL
+                WHERE address_status = 'no_street_number'
+                  AND property_address ~ '^[[:space:]]*[0-9]'
+                """
+            )
+            flagged = await conn.fetchval(
+                """
+                SELECT COUNT(*) FROM tranchi.listings
+                WHERE status IN ('active', 'not_listed')
+                  AND address_status = 'no_street_number'
+                """
+            ) or 0
+            if flagged:
+                logger.info("Address quality: %d active listings flagged no_street_number", flagged)
+            return flagged
+    except Exception as exc:
+        logger.warning("Address-flagging step failed: %s", exc)
+        return 0
+
+
 async def main() -> int:
     parser = argparse.ArgumentParser(
         description="Tranchi Engine — run deal-sourcing scrapers",
@@ -590,10 +636,11 @@ async def main() -> int:
             delisted = await _mark_stale_listings(pool, results, run_start)
             expired = await _mark_expired_listings(pool)
             stubs = await _ensure_parcels_for_listings(pool)
+            no_num = await _flag_incomplete_addresses(pool)
             dupes = await _dedup_cross_source_listings(pool)
             logger.info(
-                "Post-run: %d delisted, %d expired, %d parcel-stubs, %d dupes",
-                delisted, expired, stubs, dupes,
+                "Post-run: %d delisted, %d expired, %d parcel-stubs, %d no-number, %d dupes",
+                delisted, expired, stubs, no_num, dupes,
             )
 
         total_errors = sum(r.errors for r in results)

@@ -73,6 +73,9 @@ class ListingItem(BaseModel):
     match_method: str | None
     match_confidence: str | None
     match_score: float | None
+    # 'no_street_number' = real registry-confirmed parcel (usu. vacant land) the county
+    # lists without a house number; verify by parcel #, not street address. NULL = normal.
+    address_status: str | None
     first_seen_at: datetime | None
     last_seen_at: datetime | None
     signal_count: int
@@ -223,6 +226,7 @@ def _row_to_item(r: asyncpg.Record) -> ListingItem:
         match_method=r["match_method"],
         match_confidence=r["match_confidence"],
         match_score=_to_float(r["match_score"]),
+        address_status=r["address_status"],
         first_seen_at=r["first_seen_at"],
         last_seen_at=r["last_seen_at"],
         signal_count=sig_count,
@@ -273,6 +277,7 @@ _BASE_SELECT = """
         l.match_method,
         l.match_confidence,
         l.match_score,
+        l.address_status,
         l.first_seen_at,
         l.last_seen_at,
         COALESCE(sig.n, 0)              AS signal_count,
@@ -308,6 +313,7 @@ def _build_where(
     has_signals: bool | None,
     min_signals: int | None,
     q: str | None,
+    include_duplicates: bool = False,
 ) -> tuple[list[str], list, int]:
     """Return (conditions, params, next_idx)."""
     conditions: list[str] = []
@@ -372,6 +378,14 @@ def _build_where(
         "OR l.case_status ILIKE '%terminated%' OR l.case_status ILIKE '%dismissed%'))"
     )
 
+    # Always-on dedup gate. Cross-source dedup (run.py) marks the non-canonical copy of
+    # a property with duplicate_of -> canonical row but leaves it status='active'. The
+    # READ layer is what hides it; without this a parcel/address appearing 2-5x would
+    # show the same deal multiple times. Detail-by-id (GET /{id}) bypasses _build_where,
+    # so a duplicate can still be opened directly. include_duplicates=true = debug escape.
+    if not include_duplicates:
+        conditions.append("l.duplicate_of IS NULL")
+
     return conditions, params, idx
 
 
@@ -389,6 +403,7 @@ async def list_listings(
     has_signals: bool | None = Query(default=None),
     min_signals: int | None = Query(default=None, ge=0),
     q: str | None = Query(default=None, description="Address ILIKE search"),
+    include_duplicates: bool = Query(default=False, description="Debug: show cross-source duplicate rows"),
     sort: str = Query(default="first_seen_at"),
     order: str = Query(default="desc"),
     conn: asyncpg.Connection = Depends(get_db),
@@ -417,6 +432,7 @@ async def list_listings(
         has_signals=has_signals,
         min_signals=min_signals,
         q=q,
+        include_duplicates=include_duplicates,
     )
 
     where_sql = ("WHERE " + " AND ".join(conditions)) if conditions else ""
