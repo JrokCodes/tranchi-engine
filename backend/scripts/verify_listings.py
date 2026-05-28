@@ -82,13 +82,28 @@ def _source_and_check(r: asyncpg.Record) -> tuple[str, str]:
                                       MyPlace confirms parcel + delinquency.
       mortgage_foreclosure          — DLN published the sheriff sale; MyPlace confirms parcel.
       land_bank_inventory           — Cuyahoga Land Bank inventory page; still listed = active.
+
+    Commercial-aware: when land_use_code starts with '4' (commercial classes 4000-4999),
+    Zillow doesn't cover the asset class — CHECK steers verification to MyPlace + Court,
+    not Redfin/Zillow. Same for vacant land (5000-series) when address has no number.
     """
     sig = (r["signal_type"] or "")
     parcel = r["source_listing_id"]
     case = r["case_number"]
     addr_status = r["address_status"]
-    addr_hint = ("verify by PARCEL #, not address (vacant/unnumbered)"
-                 if addr_status == "no_street_number" else "address should match")
+    land_use_code = (r["land_use_code"] or "")
+    is_commercial = land_use_code.startswith("4") if land_use_code else False
+    is_vacant_land = land_use_code.startswith("5") and addr_status == "no_street_number"
+
+    # Choose the address hint based on land use + address completeness
+    if is_commercial:
+        addr_hint = "SKIP Zillow (commercial, not on residential MLS); confirm via MyPlace + Court"
+    elif is_vacant_land:
+        addr_hint = "verify by PARCEL # (vacant land — county lists no street number)"
+    elif addr_status == "no_street_number":
+        addr_hint = "verify by PARCEL #, not address (unnumbered)"
+    else:
+        addr_hint = "address should match"
 
     if sig == "probate":
         src = f"https://probate.cuyahogacounty.gov/pa/   (search case {case or '?'})"
@@ -125,6 +140,19 @@ def _verdict(r: asyncpg.Record) -> tuple[str, list[str]]:
     cs = (r["case_status"] or "").lower()
     if signal == "probate" and cs and any(w in cs for w in _CLOSED):
         return "STALE", [f"case {r['case_status']}"]
+
+    # Post-filing transfer check (probate only) — county records say the parcel sold
+    # at-or-after the case filing year, so the asset is no longer in the estate.
+    last_sale = r["last_sale_date"]
+    if signal == "probate" and last_sale is not None and (r["case_number"] or "").strip():
+        case_num = r["case_number"].strip()
+        if len(case_num) >= 4 and case_num[:4].isdigit():
+            filing_year = int(case_num[:4])
+            if last_sale.year >= filing_year:
+                price = r["last_sale_price"]
+                price_str = f" for ${int(price):,}" if price else ""
+                return "STALE", [f"TRANSFERRED — parcel sold {last_sale}{price_str} (case filed {filing_year})"]
+
     # Property reality (independent county registry)
     parcel_real = r["owner_name"] is not None
     if parcel_real:
@@ -139,6 +167,9 @@ def _verdict(r: asyncpg.Record) -> tuple[str, list[str]]:
         if tier == "unverified":
             verdict = "REVIEW"
             notes.append("name-only fuzzy join — verify owner==decedent")
+    # Lead age — only surface for probate where filing year is meaningful
+    if signal == "probate" and r["lead_age_days"] is not None:
+        notes.append(f"lead age: {int(r['lead_age_days'])}d")
     if not parcel_real and verdict == "VALID":
         verdict = "REVIEW"
     return verdict, notes
@@ -160,8 +191,10 @@ async def run(args) -> None:
                    l.property_zip, l.sale_date, l.opening_bid_usd, l.case_number,
                    l.case_status, l.match_confidence, l.match_method, l.status,
                    l.source_listing_id, l.address_status,
-                   p.owner_name, p.current_market_value,
-                   p.current_tax_balance, CURRENT_DATE AS today
+                   (CURRENT_DATE - l.first_seen_at::date) AS lead_age_days,
+                   p.owner_name, p.current_market_value, p.current_tax_balance,
+                   p.land_use_code, p.last_sale_date, p.last_sale_price,
+                   CURRENT_DATE AS today
             FROM tranchi.listings l
             LEFT JOIN tranchi.parcels p ON p.parcel_number = l.source_listing_id
             WHERE {where}
