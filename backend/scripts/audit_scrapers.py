@@ -76,8 +76,24 @@ _TELEGRAM_CHAT_ID = "8360510944"  # @intelleq_monitor_bot
 _COOLDOWN_FILE = Path("/tmp/tranchi-audit-scrapers-last-alert")
 _COOLDOWN_SECONDS = 1800  # 30-minute cooldown between repeated alerts
 
-_THRESHOLD = 0.10          # 10% live-vs-DB drift threshold for FULL_RESCAN sources
+_THRESHOLD = 0.10          # 10% live-vs-DB drift threshold for FULL_RESCAN sources (default)
 _COLLAPSE_THRESHOLD = 0.50 # 50% drop in scrape_runs.found → collapse flag for CURSOR/ARCHIVE
+
+# Per-source thresholds for sites with high intra-day churn (e.g., a feed gains/loses
+# listings faster than the global gate tolerates). Default is empty — Tranchi's gov't
+# sources have been stable, but the mechanism is here so we can tighten/loosen per
+# source without code churn. Mirror of Gotham's audit_scrapers.py pattern.
+# Verified via Playwright when populating: load the live page, confirm count matches
+# httpx, then decide if observed drift is real source churn vs a parser bug.
+_PER_SOURCE_THRESHOLD: dict[str, float] = {
+    # "Cuyahoga Sheriff Sale (DLN)": 0.15,  # example: if DLN churns intra-day
+    # "Cuyahoga Land Bank":          0.05,  # example: tighter when source is stable
+}
+
+# Sources where DB count is expected to be <= live for known reasons. Anything in
+# this set is gated OK regardless of drift (Gotham parallels Tidewater's "weeks 2-5
+# upstream issue" carve-out). Empty for Tranchi today.
+_KNOWN_UNDERCOUNT: set[str] = set()
 
 # DLN API — same endpoint the dln.py scraper uses; no auth required
 _DLN_API_URL = "https://www.dln.com/wp-json/dln/v1/data-table"
@@ -356,7 +372,10 @@ async def audit() -> dict[str, Any]:
             dln_drift = float("inf")
         else:
             dln_drift = abs(dln_run - dln_db) / dln_run
-        dln_ok = dln_api_ok and dln_drift <= _THRESHOLD
+        dln_threshold = _PER_SOURCE_THRESHOLD.get("Cuyahoga Sheriff Sale (DLN)", _THRESHOLD)
+        dln_ok = dln_api_ok and (
+            "Cuyahoga Sheriff Sale (DLN)" in _KNOWN_UNDERCOUNT or dln_drift <= dln_threshold
+        )
         dln_drift_display = round(dln_drift * 100, 1) if dln_drift != float("inf") else None
 
         live_results.append({
@@ -367,6 +386,7 @@ async def audit() -> dict[str, Any]:
             "run_found": dln_run,           # scraper's filtered upcoming count
             "db_active": dln_db,            # current DB active count
             "drift_pct": dln_drift_display, # run_found vs db_active
+            "threshold_pct": round(dln_threshold * 100, 1),
             "api_reachable": dln_api_ok,
             "ok": dln_ok,
             "note": dln_note,
@@ -390,7 +410,8 @@ async def audit() -> dict[str, Any]:
             lb_ok = False
         else:
             lb_drift = abs(lb_live - lb_db) / lb_live
-            lb_ok = lb_drift <= _THRESHOLD
+            lb_threshold = _PER_SOURCE_THRESHOLD.get("Cuyahoga Land Bank", _THRESHOLD)
+            lb_ok = "Cuyahoga Land Bank" in _KNOWN_UNDERCOUNT or lb_drift <= lb_threshold
 
         live_results.append({
             "source": "Cuyahoga Land Bank",
@@ -400,6 +421,7 @@ async def audit() -> dict[str, Any]:
             "db_active": lb_db,
             "run_found": lb_run,
             "drift_pct": round(lb_drift * 100, 1) if lb_drift is not None and lb_drift != float("inf") else None,
+            "threshold_pct": round(_PER_SOURCE_THRESHOLD.get("Cuyahoga Land Bank", _THRESHOLD) * 100, 1),
             "ok": lb_ok,
             "note": lb_note,
             "last_run_at": lb_state.get("last_run_at"),

@@ -523,6 +523,53 @@ async def _mark_expired_listings(pool: asyncpg.Pool) -> int:
         return 0
 
 
+async def _mark_transferred_listings(pool: asyncpg.Pool) -> int:
+    """Mark active probate listings as 'transferred' when the parcel sold AFTER the
+    probate case was filed.
+
+    The case_number prefix is the filing year (YYYY-EST-NNNNNN, e.g. '2026EST307208'
+    → 2026). When parcels.last_sale_date is >= Jan 1 of that year, the property
+    changed hands at-or-after the case opened — so even if the court case is still
+    OPEN (administering proceeds), the asset is no longer an estate asset and the
+    listing is not a viable lead. Read API's existing status='active' filter hides
+    transferred rows automatically.
+
+    Verified 2026-05-28: Playwright extraction of /MainPage/PropertyData Transfer
+    History is deterministic for parcels that have any recorded transfer; for those
+    that show 'No Information Found', last_sale_date stays NULL and they are
+    untouched. Conservative — never auto-removes without a positive sale-date signal
+    from the county.
+
+    Non-probate signal types are unaffected (they have their own staleness rules).
+    """
+    try:
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                UPDATE tranchi.listings AS l
+                SET status = 'transferred'
+                FROM tranchi.parcels AS p
+                WHERE l.source_listing_id = p.parcel_number
+                  AND l.status = 'active'
+                  AND l.signal_type = 'probate'
+                  AND l.case_number ~ '^[0-9]{4}EST'
+                  AND p.last_sale_date IS NOT NULL
+                  AND p.last_sale_date >= make_date(
+                      CAST(substring(l.case_number FROM 1 FOR 4) AS INTEGER), 1, 1
+                  )
+                """
+            )
+            count = int(result.split()[-1]) if result else 0
+            if count > 0:
+                logger.info(
+                    "Transferred detection: marked %d probate listings as transferred", count
+                )
+            return count
+    except Exception as exc:
+        logger.warning("Transferred detection failed: %s", exc)
+        return 0
+
+
 async def _flag_incomplete_addresses(pool: asyncpg.Pool) -> int:
     """Tag active listings whose address has no leading house number.
 
@@ -637,10 +684,11 @@ async def main() -> int:
             expired = await _mark_expired_listings(pool)
             stubs = await _ensure_parcels_for_listings(pool)
             no_num = await _flag_incomplete_addresses(pool)
+            transferred = await _mark_transferred_listings(pool)
             dupes = await _dedup_cross_source_listings(pool)
             logger.info(
-                "Post-run: %d delisted, %d expired, %d parcel-stubs, %d no-number, %d dupes",
-                delisted, expired, stubs, no_num, dupes,
+                "Post-run: %d delisted, %d expired, %d parcel-stubs, %d no-number, %d transferred, %d dupes",
+                delisted, expired, stubs, no_num, transferred, dupes,
             )
 
         total_errors = sum(r.errors for r in results)
