@@ -76,16 +76,26 @@ async def _pick_targets(
         params.append(signal)
     rows = await conn.fetch(
         f"""
-        SELECT DISTINCT l.source_listing_id AS parcel
+        SELECT l.source_listing_id AS parcel
         FROM tranchi.listings l
         JOIN tranchi.parcels p ON p.parcel_number = l.source_listing_id
         WHERE {where}
         ORDER BY random()
-        LIMIT {int(limit)}
+        LIMIT {int(limit) * 3}
         """,
         *params,
     )
-    return [r["parcel"] for r in rows]
+    # Dedupe preserving order, take first `limit` unique
+    seen: set[str] = set()
+    out: list[str] = []
+    for r in rows:
+        p = r["parcel"]
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+            if len(out) >= limit:
+                break
+    return out
 
 
 async def _enrich_one(parcel: str, semaphore: asyncio.Semaphore, conn: asyncpg.Connection) -> dict:
