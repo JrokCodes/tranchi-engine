@@ -221,9 +221,39 @@ def _layers(r: asyncpg.Record) -> dict:
         first_seen_label = f"{int(r['lead_age_days'])} days ago"
 
     if sig == "probate":
+        # Parse the ProWare 3-part case key from our stored case_number string.
+        # Format is <YEAR><CATEGORY><SUFFIX>, e.g. "2026EST306531" → year=2026,
+        # category=EST, suffix=306531. ProWare's Case Search form takes these as
+        # three separate fields; pasting the whole string into any single field
+        # returns no result (or returns wrong results via the name-fuzzy box).
         filing_year = None
-        if case and len(case) >= 4 and case[:4].isdigit():
-            filing_year = int(case[:4])
+        case_category_code = None
+        case_suffix = None
+        if case:
+            for i, ch in enumerate(case):
+                if not ch.isdigit():
+                    break
+            else:
+                i = len(case)
+            year_part = case[:i]
+            rest = case[i:]
+            if year_part.isdigit() and len(year_part) == 4:
+                filing_year = int(year_part)
+            for j, ch in enumerate(rest):
+                if ch.isdigit():
+                    break
+            else:
+                j = len(rest)
+            case_category_code = rest[:j] or None
+            case_suffix = rest[j:] or None
+        # Map ProWare category code → dropdown label
+        category_label = {
+            "EST": "ESTATE",
+            "GDN": "GUARDIANSHIP",
+            "TRU": "TRUST",
+            "ML": "MARRIAGE LICENSE",
+            "WIL": "WILL",
+        }.get(case_category_code or "", case_category_code or "ESTATE")
         match_method = r["match_method"] or ""
         match_conf = r["match_confidence"] or "legacy"
         is_uncertain_join = (
@@ -238,9 +268,13 @@ def _layers(r: asyncpg.Record) -> dict:
             "title": "Cuyahoga Probate Court — ProWare",
             "url": "https://probate.cuyahogacounty.gov/pa/",
             "search_for": (
-                "From the landing page, accept the disclaimer, then choose 'Case Search' "
-                "(NOT 'Docket and Index Search' — that's a name-fuzzy box and will return wrong results). "
-                f"Case Type: Estate. Paste {case or '?'} into the Case Number field."
+                "From the ProWare landing page, accept the disclaimer, then click "
+                "'Case Search' (NOT 'Docket and Index Search' — that's a name-fuzzy "
+                "box that returns wrong results). The 'Search by Case' form has "
+                f"THREE separate fields. Enter Case Year = {filing_year or '?'}, "
+                f"Case Category = {category_label}, Case Number = {case_suffix or '?'} "
+                "(JUST the digits after the category code — NOT the full "
+                f"'{case or '?'}' string)."
             ),
             "look_for": (
                 "Case Status must say OPEN or PENDING (not Closed / Disposed / Terminated / Dismissed). "
@@ -250,8 +284,10 @@ def _layers(r: asyncpg.Record) -> dict:
                 "Click 'Parties' on the case page to confirm the decedent."
             ),
             "stored": [
-                ("Case Number", case or "—"),
-                ("Filing Year", str(filing_year) if filing_year else "—"),
+                ("Full Case Number", case or "—"),
+                ("ProWare → Case Year", str(filing_year) if filing_year else "—"),
+                ("ProWare → Case Category", category_label),
+                ("ProWare → Case Number (just the suffix)", case_suffix or "—"),
                 ("Case Status (our copy)", r["case_status"] or "—"),
                 ("Candidate Decedent (parcel owner)", candidate_decedent_label),
                 ("Match Method", match_method or "(legacy / pre-tiering)"),
