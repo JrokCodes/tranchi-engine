@@ -25,27 +25,41 @@ A 404 yields found=0, which by design does NOT retire existing listings (the sta
 pass only runs for sources with found>0 — see run.py:_mark_stale_listings), so a missed
 cycle is safe; the feed simply goes stale until the URL is refreshed.
 
+INVARIANT — PRE-SALE CATALOG, MUST CHECK OUTCOME: the ArcGIS layer is the catalog of
+parcels OFFERED at a sale that has ALREADY HAPPENED (the 2025 layer = the Sept 3-4 2025
+sale). Its `Vacated_Redeemed_Pulled` flag reflects PRE-sale state, NOT the result. A
+verification pass (2026-05-29) found 199/289 catalog parcels had already SOLD/redeemed
+(now titled to private owners). So we MUST cross-check each parcel's CURRENT owner
+against the county's live EPV record and keep ONLY parcels still titled to the State
+("STATE OF OHIO" / "FORF") — those are the unsold, still-acquirable forfeited parcels.
+Do NOT trust the catalog alone, and do NOT rely on Zillow "sold" (it shows stale
+historical sales). EPV current-owner is the authority. This filter is self-correcting:
+as the 90 remaining sell, FULL_RESCAN + this check retire them automatically.
+
 INVARIANT — FORFEITED = STATE-OWNED: the deeded owner is literally "STATE OF OHIO FORF
 CV # …". The deal is acquiring from the State at back-taxes (like Land Bank), NOT
 contacting a distressed owner. We store the prior owner (grantor) as trustee_name for
 reference only.
 
-DEAL QUALITY (recon 2026-05-29, 291 parcels): all flagged foreclosure, none
-redeemed/pulled. ~190 are 1-3 family residential, ~72 vacant lots, rest commercial.
-172/291 have positive equity (market value > tax+costs); 35 strong (value ≥ 3× bid).
-We ingest ALL valid parcels (Marc: "pull everything") and store opening_bid + appraised
-so equity = appraised_value_usd - opening_bid_usd is the high-signal indicator the UI
-sorts on. Field map: Clients/Marc/tranchi/research/forfeited-land-field-map.md.
+DEAL QUALITY (recon 2026-05-29): the 2025 catalog is 291 parcels, but only ~90 remain
+state-held (unsold) after the EPV current-owner cross-check; the other ~199 sold at the
+Sept 2025 sale. Of the still-held: store opening_bid + appraised so equity =
+appraised_value_usd - opening_bid_usd is the high-signal indicator the UI sorts on.
+When the county publishes the next cycle (~mid-summer) the catalog refreshes.
+Field map: Clients/Marc/tranchi/research/forfeited-land-field-map.md.
 """
 from __future__ import annotations
 
 import logging
 from typing import Any
 
+import httpx
+
 from app.scrapers.arcgis_client import count_features, query_features
 from app.scrapers.base import ListingScraper
 from app.scrapers.db import normalize_parcel_number
 from app.scrapers.models import RawListing
+from app.scrapers.user_agents import default_headers
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +70,15 @@ _FEATURE_SERVER_URL = (
     "/2024_Forfeited_Land_Sale_Update/FeatureServer/1"
 )
 _BATCH_SIZE = 1000  # ~291 rows total — one page
+
+# County EPV parcel service (same one delinquent_tax.py uses) — the live current-owner
+# authority used to drop catalog parcels that have since sold/redeemed (see INVARIANT).
+_EPV_URL = (
+    "https://gis.cuyahogacounty.us/server/rest/services/CCFO/EPV_Prod/FeatureServer/2/query"
+)
+_EPV_CHUNK = 50  # parcels per EPV POST (keeps the IN-list small)
+# A parcel is still acquirable only while titled to the State.
+_STATE_OWNER_MARKERS = ("STATE OF OHIO", "FORF")
 
 # Field name constants (the service double-prefixes two joined tables; several
 # L2EPV_* names are truncated by ArcGIS's field-name length limit).
@@ -129,10 +152,57 @@ class ForfeitedLandScraper(ListingScraper):
                 listings.append(rl)
 
         logger.info(
-            "ForfeitedLand: %d listings parsed (%d skipped redeemed/pulled, %d skipped no-parcel)",
+            "ForfeitedLand: %d catalog listings parsed (%d skipped redeemed/pulled, %d skipped no-parcel)",
             len(listings), skipped_redeemed, skipped_no_parcel,
         )
-        return listings
+
+        # OUTCOME CHECK (see INVARIANT): the catalog is a past sale's offering list.
+        # Keep only parcels still titled to the State per the live county EPV record —
+        # drop any that have since sold/redeemed to a private owner.
+        still_held = await self._still_forfeited_parcels([rl.source_listing_id for rl in listings])
+        kept = [rl for rl in listings if rl.source_listing_id in still_held]
+        logger.info(
+            "ForfeitedLand: %d still state-held (kept), %d sold/redeemed since the sale (dropped)",
+            len(kept), len(listings) - len(kept),
+        )
+        return kept
+
+    async def _still_forfeited_parcels(self, display_parcels: list[str]) -> set[str]:
+        """Return the subset of display-format parcels whose CURRENT county owner is
+        still the State of Ohio (unsold/unredeemed → still acquirable).
+
+        Queries the live EPV parcel service (parcel_id = 8-digit compact) in chunks.
+        Fails OPEN per chunk (on error, keeps that chunk's parcels) so a transient EPV
+        hiccup never silently empties the feed — staleness is corrected next run.
+        """
+        compact_to_display = {p.replace("-", ""): p for p in display_parcels if p}
+        ids = list(compact_to_display)
+        held: set[str] = set()
+        async with httpx.AsyncClient(headers=default_headers(), timeout=60.0) as client:
+            for i in range(0, len(ids), _EPV_CHUNK):
+                chunk = ids[i:i + _EPV_CHUNK]
+                in_list = ",".join(f"'{x}'" for x in chunk)
+                try:
+                    resp = await client.post(_EPV_URL, data={
+                        "where": f"parcel_id IN ({in_list})",
+                        "outFields": "parcel_id,parcel_owner",
+                        "returnGeometry": "false",
+                        "f": "json",
+                    })
+                    resp.raise_for_status()
+                    feats = resp.json().get("features", [])
+                except Exception as exc:
+                    logger.warning("ForfeitedLand: EPV owner check failed for a chunk (%s) — keeping it", exc)
+                    held.update(compact_to_display[c] for c in chunk)
+                    continue
+                for f in feats:
+                    a = f.get("attributes", {})
+                    owner = (a.get("parcel_owner") or "").upper()
+                    if any(m in owner for m in _STATE_OWNER_MARKERS):
+                        disp = compact_to_display.get(a.get("parcel_id"))
+                        if disp:
+                            held.add(disp)
+        return held
 
     def _to_listing(self, attrs: dict[str, Any]) -> RawListing | None:
         # Parcel: ForGIS__PROPERTY_ is already display format; fall back to the
