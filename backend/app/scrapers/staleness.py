@@ -39,6 +39,9 @@ class StalenessPolicy(str, Enum):
 SOURCE_STALENESS: dict[str, StalenessPolicy] = {
     "Cuyahoga Sheriff Sale (DLN)": StalenessPolicy.FULL_RESCAN,
     "Cuyahoga Land Bank": StalenessPolicy.FULL_RESCAN,
+    # Forfeited-land re-pulls the whole locator each run; a parcel that drops off
+    # (redeemed/sold/new cycle) is genuinely gone → safe to retire by absence.
+    "Cuyahoga Forfeited Land": StalenessPolicy.FULL_RESCAN,
     "Cuyahoga Probate Court": StalenessPolicy.CURSOR,
     "Cuyahoga Sheriff Sales": StalenessPolicy.ARCHIVE,
 }

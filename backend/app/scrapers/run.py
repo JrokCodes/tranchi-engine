@@ -58,7 +58,9 @@ from app.scrapers.code_violations import (  # noqa: E402
     upsert_signals as _cv_upsert_signals,
 )
 from app.scrapers.db import upsert_listings  # noqa: E402
+from app.scrapers.delinquent_tax import DelinquentTaxScraper  # noqa: E402
 from app.scrapers.dln import DLNScraper  # noqa: E402
+from app.scrapers.forfeited_land import ForfeitedLandScraper  # noqa: E402
 from app.scrapers.fiscal_officer import (  # noqa: E402
     FiscalOfficerScraper,
     upsert_parcels as _fo_upsert_parcels,
@@ -83,6 +85,8 @@ _SCRAPERS: dict[str, type] = {
     "fiscal_officer": FiscalOfficerScraper,
     "probate": ProbateScraper,
     "dln": DLNScraper,
+    "forfeited_land": ForfeitedLandScraper,   # tax-deed listings (ArcGIS)
+    "delinquent_tax": DelinquentTaxScraper,   # tax-distress SIGNAL (ArcGIS)
 }
 
 
@@ -240,13 +244,17 @@ async def _run_scraper(
             result.new_inserted = upsert_result.get("inserted", 0)
             result.updated = upsert_result.get("updated", 0)
             result.errors = upsert_result.get("errors", 0)
-            # active for signals = total signals in DB for this source
+            # active for signals = total signals in DB for THIS source. Each
+            # SignalScraper declares its signals.source via a `signal_source`
+            # attribute (code_violations → cleveland_open_data, delinquent_tax →
+            # cuyahoga_fiscal_officer); fall back to the legacy value if unset.
+            signal_src = getattr(scraper, "signal_source", "cleveland_open_data")
             if not dry_run:
                 try:
                     async with pool.acquire() as conn:
                         result.active = await conn.fetchval(
                             "SELECT COUNT(*) FROM tranchi.signals WHERE source = $1",
-                            "cleveland_open_data",
+                            signal_src,
                         ) or 0
                 except Exception:
                     pass

@@ -126,6 +126,7 @@ class CodeViolationsScraper(SignalScraper):
     """
 
     site_name = "Cleveland Code Violations"
+    signal_source = "cleveland_open_data"  # run.py reads this for the signal active-count
 
     def __init__(
         self,

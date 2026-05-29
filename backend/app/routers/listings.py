@@ -150,6 +150,7 @@ def _to_float(v: Decimal | float | int | None) -> float | None:
 _DIM_MAP: dict[str, str] = {
     "land_bank_inventory": "Land Bank",
     "tax_delinquent_foreclosure": "Tax Foreclosure",
+    "forfeited_land": "Tax Deed (Forfeited Land)",
     "mortgage_foreclosure": "Foreclosure (Mortgage)",
     "probate": "Probate",
     "code_violation": "Code Violation",

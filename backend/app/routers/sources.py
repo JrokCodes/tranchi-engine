@@ -28,7 +28,9 @@ _SOURCE_META: dict[str, tuple[str | None, str]] = {
     "Cuyahoga Sheriff Sales": ("https://cpdocket.cp.cuyahogacounty.gov/sheriffsearch/search.aspx", "deal"),
     "Cuyahoga Sheriff Sale (DLN)": ("https://www.dln.com/", "deal"),
     "Cuyahoga Probate Court": ("https://probate.cuyahogacounty.gov/pa/", "deal"),
+    "Cuyahoga Forfeited Land": ("https://cuyahogacounty.gov/fiscal-officer/departments/real-property/forfeited-lands", "deal"),
     "Cleveland Code Violations": ("https://data.clevelandohio.gov/", "signal"),
+    "Cuyahoga Delinquent Tax": ("https://cuyahogacounty.gov/treasury/delinquency", "signal"),
     "Cuyahoga Fiscal Officer": ("https://myplace.cuyahogacounty.gov", "registry"),
 }
 
