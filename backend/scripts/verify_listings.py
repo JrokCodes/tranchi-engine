@@ -61,13 +61,14 @@ _CLOSED = ("closed", "disposed", "terminated", "dismissed")
 DEAL_SOURCES = (
     "probate",
     "tax_delinquent_foreclosure",
+    "forfeited_land",
     "mortgage_foreclosure",
     "land_bank_inventory",
 )
 
 _SELECT_COLS = """
     l.id, l.signal_type, l.source_site, l.property_address, l.property_city,
-    l.property_zip, l.sale_date, l.opening_bid_usd, l.case_number,
+    l.property_zip, l.sale_date, l.opening_bid_usd, l.appraised_value_usd, l.case_number,
     l.case_status, l.match_confidence, l.match_method, l.status,
     l.source_listing_id, l.address_status,
     (CURRENT_DATE - l.first_seen_at::date) AS lead_age_days,
@@ -139,6 +140,12 @@ def _source_and_check(r: asyncpg.Record) -> tuple[str, str]:
         chk = (f"(1) DLN legal notice still lists sale_date={r['sale_date']}  "
                f"(2) MyPlace parcel {parcel} exists + delinquency present  "
                f"(3) Redfin/Zillow off-market = good  -- {addr_hint}")
+    elif sig == "forfeited_land":
+        src = "https://cuyahogacounty.gov/fiscal-officer/departments/real-property/forfeited-lands   (Forfeited Lands Locator)"
+        chk = (f"(1) Parcel {parcel} still on the Forfeited Lands locator  "
+               f"(2) MyPlace owner = 'STATE OF OHIO FORF' (already forfeited)  "
+               f"(3) equity = market value - opening bid (tax+costs) is POSITIVE  "
+               f"(4) Redfin/Zillow off-market = expected (county-controlled)  -- {addr_hint}")
     elif sig == "land_bank_inventory":
         src = "https://landbank.cuyahogalandbank.org/   (property inventory)"
         chk = (f"(1) Land Bank still lists this property  "
@@ -331,6 +338,28 @@ def _layers(r: asyncpg.Record) -> dict:
                 ("Case Number", case or "—"),
                 ("Sale Date", str(r["sale_date"] or "—")),
                 ("Opening Bid", f"${int(r['opening_bid_usd']):,}" if r["opening_bid_usd"] else "—"),
+                ("Parcel", parcel),
+            ],
+        }
+    elif sig == "forfeited_land":
+        layer1 = {
+            "title": "Cuyahoga Forfeited Land Sale — Fiscal Officer",
+            "url": "https://cuyahogacounty.gov/fiscal-officer/departments/real-property/forfeited-lands",
+            "search_for": (
+                f"Open the Forfeited Lands Locator (ArcGIS map) and find parcel {parcel} or "
+                f"address '{r['property_address']}'."
+            ),
+            "look_for": (
+                "Parcel must still appear on the locator. These FAILED at sheriff's tax-foreclosure "
+                "auction and were forfeited to the State of Ohio — the deepest-discount tax deed "
+                "(minimum bid ≈ back taxes + costs). HIGH-SIGNAL when county market value > opening bid "
+                "(positive equity). The deeded owner is literally 'STATE OF OHIO FORF' — you buy from "
+                "the county, not a distressed owner."
+            ),
+            "stored": [
+                ("Case", case or "—"),
+                ("Opening Bid (tax+costs)", f"${int(r['opening_bid_usd']):,}" if r["opening_bid_usd"] else "—"),
+                ("County Market Value", f"${int(r['appraised_value_usd']):,}" if r["appraised_value_usd"] else "—"),
                 ("Parcel", parcel),
             ],
         }
