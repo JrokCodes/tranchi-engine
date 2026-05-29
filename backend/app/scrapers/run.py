@@ -532,23 +532,27 @@ async def _mark_expired_listings(pool: asyncpg.Pool) -> int:
 
 
 async def _mark_transferred_listings(pool: asyncpg.Pool) -> int:
-    """Mark active probate listings as 'transferred' when the parcel sold AFTER the
-    probate case was filed.
+    """Mark active listings as 'transferred' when the parcel has SOLD out from under
+    the lead — applies to EVERY source (generalized 2026-05-29), two complementary rules:
 
-    The case_number prefix is the filing year (YYYY-EST-NNNNNN, e.g. '2026EST307208'
-    → 2026). When parcels.last_sale_date is >= Jan 1 of that year, the property
-    changed hands at-or-after the case opened — so even if the court case is still
-    OPEN (administering proceeds), the asset is no longer an estate asset and the
-    listing is not a viable lead. Read API's existing status='active' filter hides
-    transferred rows automatically.
+      1. PROBATE (sold-after-filing): the case_number prefix is the filing year
+         ('2026EST307208' → 2026). last_sale_date >= Jan 1 of that year means the asset
+         changed hands at-or-after the case opened — even if the court case is still OPEN
+         (administering proceeds), the house is no longer an estate asset.
+      2. ANY SOURCE (sold-while-listed): last_sale_date > first_seen_at means the parcel
+         changed hands AFTER we started listing it — a sale/redemption we'd otherwise miss
+         between feed cycles (the cross-cutting hardening prompted by the forfeited-land
+         catalog finding). Read API's status='active' filter hides transferred rows.
 
-    Verified 2026-05-28: Playwright extraction of /MainPage/PropertyData Transfer
-    History is deterministic for parcels that have any recorded transfer; for those
-    that show 'No Information Found', last_sale_date stays NULL and they are
-    untouched. Conservative — never auto-removes without a positive sale-date signal
-    from the county.
+    NOTE — depends on last_sale_date enrichment coverage (scripts/enrich_sales.py). Today
+    that backfill is probate-focused, so rule 2 only bites on non-probate parcels once
+    enrichment is extended to them (the enrich cron's --signal scope). The guard is in
+    place and self-activates as coverage grows.
 
-    Non-probate signal types are unaffected (they have their own staleness rules).
+    Does NOT catch "sold BEFORE we first ingested" (last_sale < first_seen) — that's the
+    static-catalog case, handled at the SOURCE (e.g. forfeited_land's live EPV
+    current-owner gate). Conservative: never auto-removes without a positive county
+    sale-date signal.
     """
     try:
         async with pool.acquire() as conn:
@@ -559,11 +563,16 @@ async def _mark_transferred_listings(pool: asyncpg.Pool) -> int:
                 FROM tranchi.parcels AS p
                 WHERE l.source_listing_id = p.parcel_number
                   AND l.status = 'active'
-                  AND l.signal_type = 'probate'
-                  AND l.case_number ~ '^[0-9]{4}EST'
                   AND p.last_sale_date IS NOT NULL
-                  AND p.last_sale_date >= make_date(
-                      CAST(substring(l.case_number FROM 1 FOR 4) AS INTEGER), 1, 1
+                  AND (
+                    -- (1) probate: sold at/after the case was filed
+                    (l.signal_type = 'probate'
+                       AND l.case_number ~ '^[0-9]{4}EST'
+                       AND p.last_sale_date >= make_date(
+                           CAST(substring(l.case_number FROM 1 FOR 4) AS INTEGER), 1, 1))
+                    OR
+                    -- (2) any source: parcel changed hands after we first listed it
+                    (p.last_sale_date > l.first_seen_at::date)
                   )
                 """
             )
