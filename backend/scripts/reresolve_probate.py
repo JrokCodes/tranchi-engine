@@ -115,13 +115,19 @@ async def _pick_listings(conn: asyncpg.Connection, *, limit: int | None) -> list
     return rows
 
 
-def _decide(row: asyncpg.Record) -> tuple[str, dict]:
-    """Return (action, fields). action in keep_confirmed|retier|hide|retire|noop."""
+def _decide(row: asyncpg.Record, case_explosion: bool) -> tuple[str, dict]:
+    """Return (action, fields). action in keep_confirmed|retier|hide|retire|noop.
+
+    case_explosion: this case's name resolved to more than _AMBIGUITY_CAP DISTINCT owners
+    (e.g. decedent "Daniel James Williams" matched 30 different Williamses). A common
+    multi-token name clears a per-token match against many unrelated people, so NO name-only
+    parcel in such a case is trustworthy — only an address anchor can save it.
+    """
     method = row["match_method"] or ""
     decedent = (row["decedent_name"] or "").strip()
     owner = (row["owner_name"] or "").strip()
 
-    # Address-anchored joins are authoritative — keep as confirmed.
+    # Address-anchored joins are authoritative — keep as confirmed (even in an explosion).
     if method in _ANCHOR_METHODS:
         if row["match_confidence"] == "confirmed":
             return "noop", {}
@@ -129,6 +135,11 @@ def _decide(row: asyncpg.Record) -> tuple[str, dict]:
             "match_confidence": "confirmed",
             "match_score": max(float(row["match_score"] or 0.0), 0.95),
         }
+
+    # Common-name explosion: the case resolved to many distinct people. A name-only join
+    # can't be trusted to any of them — retire it (an address-anchored row above survives).
+    if case_explosion:
+        return "retire", {}
 
     # Name-only (or legacy NULL) — recompute against the parcel's CURRENT owner.
     if not decedent or not owner:
@@ -186,10 +197,22 @@ async def main() -> None:
         logger.info("Re-resolving %d active probate listings%s ...",
                     len(rows), " [DRY RUN]" if args.dry_run else "")
 
+        # A case is a common-name EXPLOSION when its name-only matches resolve to more than
+        # _AMBIGUITY_CAP DISTINCT current owners (different people sharing name tokens).
+        owners_by_case: dict[str, set[str]] = {}
+        for row in rows:
+            if (row["match_method"] or "") in _ANCHOR_METHODS:
+                continue
+            if row["owner_name"]:
+                owners_by_case.setdefault(row["case_number"], set()).add(row["owner_name"].strip().upper())
+        explosion_cases = {c for c, owners in owners_by_case.items() if len(owners) > _AMBIGUITY_CAP}
+        logger.info("Detected %d common-name explosion case(s) (>%d distinct owners).",
+                    len(explosion_cases), _AMBIGUITY_CAP)
+
         tally = {"keep_confirmed": 0, "retier": 0, "hide": 0, "retire": 0, "noop": 0}
         examples: list[str] = []
         for row in rows:
-            action, fields = _decide(row)
+            action, fields = _decide(row, row["case_number"] in explosion_cases)
             tally[action] += 1
             if action == "retire" and len(examples) < 8:
                 examples.append(
