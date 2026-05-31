@@ -53,7 +53,7 @@ if _env.exists():
 import asyncpg  # noqa: E402
 
 from app.scrapers.fiscal_officer import _name_confidence  # noqa: E402
-from app.scrapers.probate import _MIN_CONFIDENCE, _HIGH_CONFIDENCE  # noqa: E402
+from app.scrapers.probate import _MIN_CONFIDENCE, _HIGH_CONFIDENCE, _AMBIGUITY_CAP  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("reresolve_probate")
@@ -103,7 +103,8 @@ async def _pick_listings(conn: asyncpg.Connection, *, limit: int | None) -> list
         f"""
         SELECT l.id, l.case_number, l.decedent_name, l.source_listing_id AS parcel,
                l.match_method, l.match_confidence, l.match_score,
-               p.owner_name
+               p.owner_name,
+               COUNT(*) OVER (PARTITION BY l.case_number) AS case_count
         FROM tranchi.listings l
         LEFT JOIN tranchi.parcels p ON p.parcel_number = l.source_listing_id
         WHERE l.signal_type = 'probate' AND l.status = 'active'
@@ -131,9 +132,14 @@ def _decide(row: asyncpg.Record) -> tuple[str, dict]:
 
     # Name-only (or legacy NULL) — recompute against the parcel's CURRENT owner.
     if not decedent or not owner:
-        # Can't verify yet (no decedent captured, or parcel not enriched). Hide it
-        # (read gate drops 'unverified'); never delete on missing data — a re-run heals
-        # it once enrich_parcels populates the owner.
+        # Can't verify per-row (no decedent captured, or parcel not enriched). If this
+        # case is part of an over-match EXPLOSION (> _AMBIGUITY_CAP parcels), the cluster
+        # itself is the evidence of a name over-match (a real estate rarely owns that many
+        # parcels) — retire it, same rule the live scraper now applies at emit time.
+        # A small unverifiable case is left HIDDEN (not deleted) to heal once enrich_parcels
+        # fills the owner; a later run then re-tiers or retires it precisely.
+        if (row["case_count"] or 0) > _AMBIGUITY_CAP:
+            return "retire", {}
         if row["match_confidence"] == "unverified":
             return "noop", {}
         return "hide", {"match_method": "name_match", "match_confidence": "unverified"}
