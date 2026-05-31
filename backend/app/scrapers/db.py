@@ -468,7 +468,10 @@ async def _upsert_one(
                 case_status_date    = COALESCE($17, case_status_date),
                 match_method        = COALESCE($18, match_method),
                 match_confidence    = COALESCE($19, match_confidence),
-                match_score         = COALESCE($20, match_score)
+                match_score         = COALESCE($20, match_score),
+                decedent_name       = COALESCE($21, decedent_name),
+                case_title          = COALESCE($22, case_title),
+                decedent_dod        = COALESCE($23, decedent_dod)
             WHERE id = $15
             """,
             listing.deposit_usd,
@@ -491,6 +494,9 @@ async def _upsert_one(
             listing.match_method,
             listing.match_confidence,
             listing.match_score,
+            listing.decedent_name,
+            listing.case_title,
+            listing.decedent_dod,
         )
         return existing_id, False
 
@@ -503,7 +509,8 @@ async def _upsert_one(
             deposit_usd, trustee_name, status, normalized_address,
             signal_type, source_listing_id,
             auction_status, opening_bid_usd, appraised_value_usd, sec_sale_date,
-            case_status, case_status_date, match_method, match_confidence, match_score
+            case_status, case_status_date, match_method, match_confidence, match_score,
+            decedent_name, case_title, decedent_dod
         ) VALUES (
             $1,  $2,  $3,
             $4,  $5,  $6,
@@ -511,7 +518,8 @@ async def _upsert_one(
             $11, $12, $13, $14,
             $15, $16,
             $17, $18, $19, $20,
-            $21, $22, $23, $24, $25
+            $21, $22, $23, $24, $25,
+            $26, $27, $28
         )
         RETURNING id
         """,
@@ -540,6 +548,9 @@ async def _upsert_one(
         listing.match_method,
         listing.match_confidence,
         listing.match_score,
+        listing.decedent_name,
+        listing.case_title,
+        listing.decedent_dod,
     )
     return new_id, True
 

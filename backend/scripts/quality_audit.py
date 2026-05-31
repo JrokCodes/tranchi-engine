@@ -332,6 +332,54 @@ async def check_probate_validity(conn: asyncpg.Connection) -> list[dict[str, Any
     return findings
 
 
+async def check_probate_join_sanity(conn: asyncpg.Connection) -> list[dict[str, Any]]:
+    """
+    Detect a regression of the probate decedent->parcel mis-join bug (the one that
+    attached one common surname to 775 parcels). See Babel reference/JOIN-PRECISION.md.
+
+    Flags:
+      1. "overmatched_case" — an active probate case attached to more than
+         _OVERMATCH_CAP distinct parcels. After the precision-first matcher + the
+         reresolve_probate cleanup this should be ~0; a reappearance means the matcher
+         regressed (over-matching on name again). ALERTS.
+      2. "shown_without_decedent" — count of probate listings SHOWN in the feed
+         (match_confidence in confirmed/probable) that have NO decedent_name on the row,
+         so the decedent-vs-owner check can't run. Informational (small number expected
+         while the migration-007 backfill catches up).
+    """
+    _OVERMATCH_CAP = 8  # a real person rarely owns >8 parcels; explosions were 100s
+    findings: list[dict[str, Any]] = []
+
+    overmatched = await conn.fetch("""
+        SELECT case_number, COUNT(DISTINCT source_listing_id) AS n
+        FROM tranchi.listings
+        WHERE source_site = 'Cuyahoga Probate Court'
+          AND status = 'active'
+          AND duplicate_of IS NULL
+        GROUP BY case_number
+        HAVING COUNT(DISTINCT source_listing_id) > $1
+        ORDER BY n DESC
+    """, _OVERMATCH_CAP)
+    for r in overmatched:
+        findings.append({
+            "type": "overmatched_case",
+            "case_number": r["case_number"],
+            "parcel_count": r["n"],
+            "cap": _OVERMATCH_CAP,
+        })
+
+    shown_no_decedent = await conn.fetchval("""
+        SELECT COUNT(*) FROM tranchi.listings
+        WHERE source_site = 'Cuyahoga Probate Court'
+          AND status = 'active'
+          AND duplicate_of IS NULL
+          AND match_confidence IN ('confirmed', 'probable')
+          AND decedent_name IS NULL
+    """)
+    findings.append({"type": "shown_without_decedent", "count": shown_no_decedent or 0})
+    return findings
+
+
 async def check_signal_freshness(conn: asyncpg.Connection) -> list[dict[str, Any]]:
     """
     code_violation signals with status='open' last observed more than
@@ -491,6 +539,18 @@ def _format_digest(findings: dict[str, list[dict[str, Any]]]) -> str:
         tier_str = "  confidence tiers: " + ", ".join(f"{k}={v}" for k, v in tiers.items())
         lines.append(tier_str)
 
+    # 5b. probate_join_sanity
+    pj = findings.get("probate_join_sanity", [])
+    overmatched = [x for x in pj if x.get("type") == "overmatched_case"]
+    no_dec = next((x for x in pj if x.get("type") == "shown_without_decedent"), {})
+    lines.append(
+        f"\n[probate_join_sanity] {len(overmatched)} over-matched case(s) "
+        f"(>{overmatched[0]['cap'] if overmatched else 8} parcels — expected 0); "
+        f"{no_dec.get('count', 0)} shown rows missing decedent_name"
+    )
+    for r in overmatched[:5]:
+        lines.append(f"  - {r['case_number']}: {r['parcel_count']} parcels")
+
     # 6. signal_freshness
     sf = findings["signal_freshness"]
     if sf:
@@ -530,6 +590,8 @@ def _print_table(findings: dict[str, list[dict[str, Any]]], elapsed: float) -> N
         ("address_completeness", findings["address_completeness"]),
         ("probate_validity",
          [x for x in findings["probate_validity"] if x.get("sub_check") == "closed_case_still_active"]),
+        ("probate_join_sanity",
+         [x for x in findings.get("probate_join_sanity", []) if x.get("type") == "overmatched_case"]),
         ("signal_freshness",
          [{"total": findings["signal_freshness"][0]["total_stale"]}] if findings["signal_freshness"] else []),
         ("coverage_delta", [r for r in findings["coverage_delta"] if r["flagged"]]),
@@ -563,6 +625,7 @@ async def main() -> None:
             "stale_active_leak":    await check_stale_active_leak(conn),
             "address_completeness": await check_address_completeness(conn),
             "probate_validity":     await check_probate_validity(conn),
+            "probate_join_sanity":  await check_probate_join_sanity(conn),
             "signal_freshness":     await check_signal_freshness(conn),
             "coverage_delta":       await check_coverage_delta(conn),
         }
@@ -584,12 +647,17 @@ async def main() -> None:
         if x.get("sub_check") == "closed_case_still_active"
     ]
     flagged_coverage = [r for r in findings["coverage_delta"] if r["flagged"]]
+    overmatched_joins = [
+        x for x in findings.get("probate_join_sanity", [])
+        if x.get("type") == "overmatched_case"
+    ]
     anything_flagged = (
         findings["same_source_dupes"]
         or findings["past_sale_not_expired"]
         or findings["stale_active_leak"]
         or findings["address_completeness"]
         or closed_probate
+        or overmatched_joins
         or flagged_coverage
     )
     if anything_flagged:

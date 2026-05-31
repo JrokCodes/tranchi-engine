@@ -4,6 +4,13 @@ Cuyahoga County Probate Court scraper — Estate cases only.
 Site:     https://probate.cuyahogacounty.gov/pa/
 Platform: ProWare ASP.NET WebForms (Build 2.6.0416).
 
+INVARIANT — PRECISION-FIRST PARCEL JOIN (do not loosen without the audit + gate):
+A decedent→parcel join by NAME over-matches. Emit a name-only parcel ONLY when the
+full name matches (both given + surname, via fiscal_officer._name_confidence) AND the
+case resolves to <= _AMBIGUITY_CAP parcels. Address-anchored parcels always emit;
+ambiguous/weak name-only parcels emit NOTHING. Loosening this re-creates the bug where
+one common surname attached a case to 775 parcels (68 real). See reference/JOIN-PRECISION.md.
+
 STRATEGY: ID CURSOR ENUMERATION
 The probate search form has NO date-range filter — only Case Year. Rather
 than sweeping alphabetically by name (expensive and yields full history),
@@ -128,6 +135,13 @@ _MIN_CONFIDENCE = 0.75
 
 # Minimum confidence to flag as "high confidence" (vs. ambiguous)
 _HIGH_CONFIDENCE = 0.90
+
+# PRECISION-FIRST join cap (see reference/JOIN-PRECISION.md). If a decedent name-search
+# resolves to more than this many parcels with NO address anchor, treat it as an
+# ambiguous common-name explosion and emit NOTHING for the name-only parcels (a real
+# person rarely owns >5 parcels; a common name matches dozens). Address-anchored parcels
+# always emit. This + the _name_confidence full-name fix kill the 775-listing mis-join.
+_AMBIGUITY_CAP = 5
 
 # Party role codes (from field-map section A)
 _ROLE_DECEDENT = "DECEDENT"
@@ -671,12 +685,27 @@ class ProbateScraper(ListingScraper):
                             decedent_address, case_number, exc,
                         )
 
-                # ── Step 5: Classify + emit one RawListing per unique parcel ───
+                # ── Step 5: Classify + emit (PRECISION-FIRST) ─────────────────
+                # A name-only join is the mis-join risk (common surnames). Emit a parcel
+                # only when it is ADDRESS-anchored, OR the name search is unambiguous
+                # (<= _AMBIGUITY_CAP parcels) AND the full-name match tiered 'probable'+.
+                # Ambiguous (common-name explosion) and weak unverified name-only parcels
+                # are skipped entirely — no listing, no signal. See JOIN-PRECISION.md.
+                name_ambiguous = len(name_hits) > _AMBIGUITY_CAP
+                emitted = skipped_ambiguous = skipped_weak = 0
                 for parcel_number in set(name_hits) | set(addr_hits):
-                    match, method, tier, score = _classify_match(
-                        name_hits.get(parcel_number),
-                        addr_hits.get(parcel_number),
-                    )
+                    name_match = name_hits.get(parcel_number)
+                    addr_match = addr_hits.get(parcel_number)
+                    match, method, tier, score = _classify_match(name_match, addr_match)
+
+                    if addr_match is None:  # name-only path — apply precision gates
+                        if name_ambiguous:
+                            skipped_ambiguous += 1
+                            continue
+                        if tier == "unverified":
+                            skipped_weak += 1
+                            continue
+
                     listing = _build_listing(
                         match=match,
                         case_number=case_number,
@@ -684,6 +713,7 @@ class ProbateScraper(ListingScraper):
                         case_status_date=summary_data.get("status_date"),
                         filing_date=filing_date,
                         decedent_name=decedent_name,
+                        case_title=summary_data.get("case_title"),
                         dod=dod,
                         executor_name=executor_name,
                         attorney_name=attorney_name,
@@ -693,6 +723,7 @@ class ProbateScraper(ListingScraper):
                         match_score=score,
                     )
                     all_listings.append(listing)
+                    emitted += 1
 
                     # Persist the matched parcel to the registry (owner+address were
                     # already fetched via the MyPlace search) so the listing is
@@ -721,6 +752,13 @@ class ProbateScraper(ListingScraper):
                         dod=dod,
                         confidence=score,
                         dry_run=self._dry_run,
+                    )
+
+                if skipped_ambiguous or skipped_weak:
+                    logger.info(
+                        "Case %s: precision gate — emitted %d, skipped %d ambiguous "
+                        "(name-only, >%d parcels), %d weak (unverified name-only)",
+                        case_number, emitted, skipped_ambiguous, _AMBIGUITY_CAP, skipped_weak,
                     )
 
                 if not (name_hits or addr_hits):
@@ -819,6 +857,7 @@ def _build_listing(
     case_status_date: date | None,
     filing_date: date | None,
     decedent_name: str | None,
+    case_title: str | None,
     dod: date | None,
     executor_name: str | None,
     attorney_name: str | None,
@@ -862,6 +901,9 @@ def _build_listing(
         match_method=match_method,
         match_confidence=match_confidence,
         match_score=match_score,
+        decedent_name=decedent_name or None,
+        case_title=case_title or None,
+        decedent_dod=dod,
     )
 
 

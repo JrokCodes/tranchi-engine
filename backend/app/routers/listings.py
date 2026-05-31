@@ -315,6 +315,7 @@ def _build_where(
     min_signals: int | None,
     q: str | None,
     include_duplicates: bool = False,
+    include_unverified: bool = False,
 ) -> tuple[list[str], list, int]:
     """Return (conditions, params, next_idx)."""
     conditions: list[str] = []
@@ -387,6 +388,20 @@ def _build_where(
     if not include_duplicates:
         conditions.append("l.duplicate_of IS NULL")
 
+    # Always-on probate join-CONFIDENCE gate (precision-first; see Babel
+    # reference/JOIN-PRECISION.md). A probate listing is shown only when its
+    # decedent->parcel join is 'confirmed' or 'probable'. 'unverified' (weak name-only)
+    # and NULL/legacy (un-tiered) joins are mis-join risks — hidden from the feed. This
+    # is DATA-QUALITY gating, NOT deal pre-filtering: a mis-join is bad data, not a
+    # narrow-but-valid deal, so it stays consistent with "pull everything valid, UI
+    # filters". Rows are re-tiered by the precision matcher + scripts/reresolve_probate.py.
+    # include_unverified=true = debug escape (still subject to the open-cases gate above).
+    if not include_unverified:
+        conditions.append(
+            "(l.signal_type IS DISTINCT FROM 'probate' "
+            "OR l.match_confidence IN ('confirmed', 'probable'))"
+        )
+
     return conditions, params, idx
 
 
@@ -405,6 +420,7 @@ async def list_listings(
     min_signals: int | None = Query(default=None, ge=0),
     q: str | None = Query(default=None, description="Address ILIKE search"),
     include_duplicates: bool = Query(default=False, description="Debug: show cross-source duplicate rows"),
+    include_unverified: bool = Query(default=False, description="Debug: show probate rows with unverified/untiered decedent→parcel joins"),
     sort: str = Query(default="first_seen_at"),
     order: str = Query(default="desc"),
     conn: asyncpg.Connection = Depends(get_db),
@@ -434,6 +450,7 @@ async def list_listings(
         min_signals=min_signals,
         q=q,
         include_duplicates=include_duplicates,
+        include_unverified=include_unverified,
     )
 
     where_sql = ("WHERE " + " AND ".join(conditions)) if conditions else ""

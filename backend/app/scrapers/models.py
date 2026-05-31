@@ -60,6 +60,13 @@ class RawListing(BaseModel):
     match_method: str | None = None
     match_confidence: str | None = None
     match_score: float | None = None
+    # Decedent identity denormalized onto the listing row (probate; migration 007).
+    # Previously only in signals.payload, which was dropped when the parcel FK gated —
+    # leaving the verifier to guess "decedent = parcel owner", wrong on mis-joins.
+    # Storing it here lets every probate card compare decedent vs current owner directly.
+    decedent_name: str | None = None
+    case_title: str | None = None
+    decedent_dod: date | None = None
 
 
 class RawSignal(BaseModel):

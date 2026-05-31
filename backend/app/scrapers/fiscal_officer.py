@@ -107,6 +107,11 @@ _TIMEOUT = 30.0
 # Levenshtein fuzzy match threshold (0.0–1.0) for search_by_owner
 _FUZZY_THRESHOLD = 0.75
 
+# Per-token similarity at/above which a single name part counts as a STRONG match.
+# _name_confidence requires ≥2 strong token matches (given + surname) so a shared
+# surname alone can never confirm a join. See reference/JOIN-PRECISION.md.
+_STRONG_TOKEN = 0.85
+
 # For the bulk delinquent sweep: letters A-Z to cover all owner names
 _ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
@@ -191,10 +196,18 @@ def _name_confidence(query: str, candidate: str) -> float:
     """
     Compute a 0.0–1.0 confidence that candidate owner name matches the query.
 
-    Strategy:
-    1. Exact normalized match → 1.0
-    2. Query tokens all appear in candidate → 0.9
-    3. Levenshtein similarity on longest-matching token → fuzzy score
+    PRECISION-FIRST (see Babel reference/JOIN-PRECISION.md). A probate case must join
+    a parcel only when the FULL name aligns — both the given name AND the surname.
+    The old logic AVERAGED per-token similarity (and short-circuited any token-subset
+    to 0.9), so a candidate sharing only the surname scored ~0.83 (surname=1.0 dragging
+    up a weak given-name match) and cleared the 0.75 bar. That attached one decedent to
+    every same-surname owner county-wide — case 2026EST304870 → 775 listings, 68 real.
+
+    Fix: require at least TWO significant query tokens to each find a STRONG match
+    (≥ _STRONG_TOKEN) in the candidate, and score on those strong matches. A surname-only
+    (single-token) query, or a candidate that aligns on only one token, returns a score
+    below threshold — so "DARVIS HARRIS" no longer matches "HARRIS, MARY". Extra tokens
+    (middle names, suffixes) don't penalize: we require ≥2 strong, not all.
     """
     qn = _normalize_name(query)
     cn = _normalize_name(candidate)
@@ -202,30 +215,30 @@ def _name_confidence(query: str, candidate: str) -> float:
     if qn == cn:
         return 1.0
 
-    # Check if all query tokens appear in candidate (handles "SMITH" matching "SMITH, JOHN")
-    q_tokens = set(qn.split())
-    c_tokens = set(cn.split())
-    if q_tokens and q_tokens.issubset(c_tokens):
-        return 0.9
+    # Significant tokens only: drop 1-char initials and generational suffixes so a
+    # missing middle initial / "JR" neither helps nor hurts the comparison.
+    _SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
+    q_tokens = [t for t in qn.split() if len(t) >= 2 and t not in _SUFFIXES]
+    c_tokens = [t for t in cn.split() if len(t) >= 2 and t not in _SUFFIXES]
 
-    # Levenshtein on the normalized strings
-    max_len = max(len(qn), len(cn), 1)
-    dist = _levenshtein(qn, cn)
-    similarity = 1.0 - dist / max_len
+    # Cannot confirm identity on a single token (surname alone) — this IS the over-match
+    # trap. Refuse rather than matching every same-surname owner.
+    if len(q_tokens) < 2 or not c_tokens:
+        return 0.0
 
-    # Also try token-level: for each query token find best matching candidate token
-    if q_tokens and c_tokens:
-        token_scores = []
-        for qt in q_tokens:
-            best = max(
-                1.0 - _levenshtein(qt, ct) / max(len(qt), len(ct), 1)
-                for ct in c_tokens
-            )
-            token_scores.append(best)
-        token_sim = sum(token_scores) / len(token_scores)
-        similarity = max(similarity, token_sim)
+    # Best fuzzy similarity of each query token against any candidate token.
+    per_token = [
+        max(1.0 - _levenshtein(qt, ct) / max(len(qt), len(ct), 1) for ct in c_tokens)
+        for qt in q_tokens
+    ]
+    strong = [s for s in per_token if s >= _STRONG_TOKEN]
 
-    return round(similarity, 4)
+    # Require ≥2 name parts to align strongly (given + family). One strong token
+    # (the shared surname) is NOT enough.
+    if len(strong) < 2:
+        return round(max(per_token) * 0.5, 4)  # always < threshold → filtered out
+
+    return round(sum(strong) / len(strong), 4)
 
 
 def _parse_parcel_number(raw: str) -> str:

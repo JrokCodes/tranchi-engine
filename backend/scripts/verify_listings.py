@@ -71,6 +71,7 @@ _SELECT_COLS = """
     l.property_zip, l.sale_date, l.opening_bid_usd, l.appraised_value_usd, l.case_number,
     l.case_status, l.match_confidence, l.match_method, l.status,
     l.source_listing_id, l.address_status,
+    l.decedent_name, l.case_title, l.decedent_dod,
     (CURRENT_DATE - l.first_seen_at::date) AS lead_age_days,
     p.owner_name, p.current_market_value, p.current_tax_balance,
     p.land_use_code, p.last_sale_date, p.last_sale_price,
@@ -263,13 +264,12 @@ def _layers(r: asyncpg.Record) -> dict:
         }.get(case_category_code or "", case_category_code or "ESTATE")
         match_method = r["match_method"] or ""
         match_conf = r["match_confidence"] or "legacy"
-        is_uncertain_join = (
-            match_method == "" or match_conf in ("unverified", "legacy", None)
-        )
-        candidate_decedent_label = (
-            f"{r['owner_name'] or '—'} (name-fuzzy match — verify on ProWare)"
-            if is_uncertain_join
-            else (r["owner_name"] or "—")
+        # Decedent now comes from our STORED case data (migration 007), not a guess off
+        # the parcel owner. The whole point: compare the real decedent vs the current
+        # owner. A mismatch = mis-join.
+        decedent_label = (
+            r["decedent_name"]
+            or (f"(not captured — confirm on ProWare; parcel owner is {r['owner_name'] or '—'})")
         )
         layer1 = {
             "title": "Cuyahoga Probate Court — ProWare",
@@ -296,7 +296,8 @@ def _layers(r: asyncpg.Record) -> dict:
                 ("ProWare → Case Category", category_label),
                 ("ProWare → Case Number (just the suffix)", case_suffix or "—"),
                 ("Case Status (our copy)", r["case_status"] or "—"),
-                ("Candidate Decedent (parcel owner)", candidate_decedent_label),
+                ("Decedent (our stored case data)", decedent_label),
+                ("Parcel Owner (county registry — must match decedent)", r["owner_name"] or "—"),
                 ("Match Method", match_method or "(legacy / pre-tiering)"),
                 ("Match Confidence", match_conf),
                 ("First Seen By Us", first_seen_label),
