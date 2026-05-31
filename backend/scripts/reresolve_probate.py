@@ -168,8 +168,12 @@ def _decide(row: asyncpg.Record, case_explosion: bool) -> tuple[str, dict]:
 
 async def _apply(conn: asyncpg.Connection, listing_id, action: str, fields: dict) -> None:
     if action == "retire":
+        # Clear the join tier too, so a retired mis-join can never satisfy the read-API
+        # confidence gate on a status-less query (the dashboard always sends status=active,
+        # but raw queries shouldn't surface superseded rows either).
         await conn.execute(
-            "UPDATE tranchi.listings SET status='superseded', last_seen_at=NOW() WHERE id=$1",
+            "UPDATE tranchi.listings "
+            "SET status='superseded', match_confidence=NULL, last_seen_at=NOW() WHERE id=$1",
             listing_id,
         )
         return
