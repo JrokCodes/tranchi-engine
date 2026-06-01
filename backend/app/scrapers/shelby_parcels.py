@@ -114,7 +114,11 @@ def _regis_ssl_context() -> ssl.SSLContext:
     query against a government GIS endpoint.
     """
     ctx = ssl.create_default_context()
-    ctx.options |= getattr(ssl, "OP_LEGACY_SERVER_CONNECT", 0)
+    # OP_LEGACY_SERVER_CONNECT (0x4). The ssl attribute is NOT exposed on every
+    # build (absent on EC2's Python against OpenSSL 3.0.2), so getattr(...,0) would
+    # silently no-op → "UNSAFE_LEGACY_RENEGOTIATION_DISABLED" at runtime. Hardcode
+    # the value with the attribute as a forward-compatible preference.
+    ctx.options |= getattr(ssl, "OP_LEGACY_SERVER_CONNECT", 0x4) or 0x4
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
     return ctx
