@@ -36,6 +36,7 @@ if _env.exists():
     from dotenv import load_dotenv
     load_dotenv(_env)
 
+import re               # noqa: E402
 import asyncpg            # noqa: E402
 from bs4 import BeautifulSoup  # noqa: E402
 
@@ -70,7 +71,13 @@ def _split_case(case_number: str) -> tuple[str, str, str] | None:
 def _norm(addr: str | None) -> str | None:
     if not addr:
         return None
-    return normalize_address(canonical_address(addr) or "") or None
+    n = normalize_address(canonical_address(addr) or "") or None
+    if n:
+        # Reconcile street-number ordinals so "128th" == "128" (e.g. court address
+        # "3466 W. 128TH STREET" vs parcel "3466 W 128 St").
+        n = re.sub(r"\b(\d+)(st|nd|rd|th)\b", r"\1", n)
+        n = re.sub(r"\s+", " ", n).strip()
+    return n or None
 
 
 def _addr_match(a: str | None, b: str | None) -> bool:
