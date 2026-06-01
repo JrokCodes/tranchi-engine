@@ -83,13 +83,15 @@ GENERAL_GUIDE = (
 def _make_cuyahoga_market() -> dict:
     """Cuyahoga (Cleveland, OH) market config."""
 
-    def registry_link(parcel: str | None, address: str | None) -> str:
+    def registry_link(parcel: str | None, address: str | None,
+                      native_parcel_id: str | None = None) -> str:
         if not parcel:
             return "https://myplace.cuyahogacounty.gov/"
         return f"https://myplace.cuyahogacounty.gov/?parcel={urllib.parse.quote(parcel)}"
 
     def source_link(signal_type: str, parcel: str | None, case: str | None,
-                    sale_date, address: str | None) -> str:
+                    sale_date, address: str | None,
+                    native_parcel_id: str | None = None) -> str:
         sig = signal_type or ""
         if sig == "probate":
             return f"https://probate.cuyahogacounty.gov/pa/   (search case {case or '?'})"
@@ -205,38 +207,66 @@ def _make_cuyahoga_market() -> dict:
     }
 
 
-def _make_shelby_market() -> dict:
-    """Shelby County (Memphis, TN) market config."""
+def _trustee_parcel_url(native_parcel_id: str | None) -> str | None:
+    """Build one-click Shelby County Trustee parcel URL from the native spaced id.
 
-    def registry_link(parcel: str | None, address: str | None) -> str:
-        # Shelby County Assessor deep-link by parcel (14-char numeric).
-        # The Assessor site accepts parcel in the query string; if it doesn't resolve,
-        # the human can paste the parcel into the ReGIS viewer or Register of Deeds.
-        if parcel:
-            assessor_url = (
-                "https://www.assessormelvinburgess.com/property_detail.aspx"
-                f"?parcelid={urllib.parse.quote(parcel)}"
-            )
-            return assessor_url
-        # Fallback: Assessor homepage — human can search by address.
-        return "https://www.assessormelvinburgess.com/"
+    The Trustee URL requires the county's native SPACED form (e.g. '042035  00007'),
+    URL-encoded as '042035%20%2000007'. Our canonical 14-char form is NOT accepted.
+    Returns None when native_parcel_id is absent (stub parcels / not yet in ReGIS).
+    """
+    if not native_parcel_id:
+        return None
+    return (
+        "https://apps2.shelbycountytrustee.com/Parcel?parcel="
+        + urllib.parse.quote(native_parcel_id, safe="")
+    )
+
+
+def _make_shelby_market() -> dict:
+    """Shelby County (Memphis, TN) market config.
+
+    UNIVERSAL VERIFIER: The Shelby County Trustee parcel page is the single source
+    of truth for ALL Shelby categories. One page shows: PRIMARY OWNER, LOCATION,
+    MAILING ADDRESS, TAX DUE / TOTAL BALANCE, multi-year BILLING HISTORY, and —
+    when scheduled — a 'TAX SALE PROPERTY NOTICE / Tax Sale ID: TS####' block.
+    It also has external links to REGISTER GIS and ASSESSOR GIS.
+
+    URL form: https://apps2.shelbycountytrustee.com/Parcel?parcel=<native_id_url_encoded>
+    where native_id is the spaced PARCELID from ReGIS (e.g. '042035  00007').
+    Our canonical 14-char form does NOT work — only the native spaced form does.
+    """
+
+    def registry_link(parcel: str | None, address: str | None,
+                      native_parcel_id: str | None = None) -> str:
+        # Primary: Trustee parcel page (one-click, shows owner + tax due + tax sale notice).
+        url = _trustee_parcel_url(native_parcel_id)
+        if url:
+            return url
+        # Fallback: Trustee PropertyClient search (SPA — human must type the address).
+        return "https://apps2.shelbycountytrustee.com/PropertyClient"
 
     def source_link(signal_type: str, parcel: str | None, case: str | None,
-                    sale_date, address: str | None) -> str:
+                    sale_date, address: str | None,
+                    native_parcel_id: str | None = None) -> str:
         sig = signal_type or ""
         if sig == "tax_deed":
-            ts_code = case or parcel or "?"
-            return (
-                f"https://www.shelbycountytrustee.com/161/Properties-Available-for-Sale"
-                f"   (Tax Sale; find parcel {parcel or '?'} / TS code {ts_code})"
-            )
+            # Layer 1 for tax_deed = same Trustee page, but caller looks for the
+            # 'TAX SALE PROPERTY NOTICE / Tax Sale ID: TS####' block as the proof.
+            url = _trustee_parcel_url(native_parcel_id)
+            if url:
+                return url
+            # Fallback: Trustee search SPA (human types address).
+            return "https://apps2.shelbycountytrustee.com/PropertyClient"
         elif sig == "land_bank_inventory":
             return (
                 "https://public-sctn.epropertyplus.com/landmgmtpub/app/base/landing"
                 f"   (Shelby County Land Bank — search parcel {parcel or '?'})"
             )
         else:
-            return "https://www.assessormelvinburgess.com/"
+            url = _trustee_parcel_url(native_parcel_id)
+            if url:
+                return url
+            return "https://apps2.shelbycountytrustee.com/PropertyClient"
 
     def offmarket_links(address: str, city: str | None, zip_: str | None) -> tuple[str, str]:
         return _zillow_url(address, city, "TN", zip_), _redfin_url(address, city, "TN", zip_)
@@ -244,47 +274,45 @@ def _make_shelby_market() -> dict:
     verification_guide = {
         "tax_deed": {
             "valid": (
-                "Parcel appears on the Shelby County Trustee's current delinquent tax-sale list. "
-                "The Assessor registry owner is a PRIVATE party (a person or LLC) who is behind on taxes — "
-                "that is the motivated seller. The property exists at the address in the registry. "
-                "TN NOTE: These are PRE-sale listings — the property is 'about to be lost for back taxes.' "
-                "After the tax sale, TN gives the original owner ~1 year to redeem (pay back taxes + costs), "
-                "so post-sale the deal is not fully locked yet. Phase-1 is the highest-leverage window: "
+                "On the Trustee page: PRIMARY OWNER should be a PRIVATE party (person or LLC) who is "
+                "behind on taxes. TAX DUE should be > $0. You should see a 'TAX SALE PROPERTY NOTICE' "
+                "block with a Tax Sale ID (e.g. TS2302) — this is the proof the parcel is scheduled. "
+                "TN NOTE: These are PRE-sale listings. After the sale, TN gives the original owner ~1 "
+                "year to redeem (pay back taxes + costs). Phase-1 is the highest-leverage window: "
                 "approach BEFORE the sale while the owner is still motivated."
             ),
             "red_flags": (
-                "Owner in the Assessor registry is already the county or land bank (not a pre-sale — "
-                "the county already took it; treat as a land-bank deal instead). "
-                "Parcel was recently transferred to a new private owner (likely paid off or sold — "
-                "the back-tax pressure is gone). "
-                "Address or parcel doesn't exist in the registry (bad data — skip). "
-                "TS code on the Trustee site doesn't match what we stored."
+                "No tax balance due / no 'Tax Sale Property Notice' on the Trustee page = not scheduled "
+                "or already redeemed (skip). Owner already shows as the land bank or county "
+                "('SHELBY COUNTY TAX SALE' or similar) = county already took it; treat as land-bank "
+                "deal instead. Parcel was recently transferred to a new private owner = paid off or "
+                "sold, back-tax pressure gone."
             ),
         },
         "land_bank_inventory": {
             "valid": (
-                "Property is currently FOR SALE in the Shelby County Land Bank ePropertyPlus portal. "
-                "Assessor registry owner contains 'SHELBY COUNTY TAX SALE' or similar — this confirms "
-                "the county acquired the property via tax sale and is now reselling it cheaply for "
-                "redevelopment. An asking price is shown on the portal."
+                "On the Trustee page: PRIMARY OWNER should read 'SHELBY COUNTY TAX SALE...' — confirms "
+                "the county acquired it via tax sale. Property should appear in the ePropertyPlus portal "
+                "(https://public-sctn.epropertyplus.com/landmgmtpub/app/base/landing) with status FOR SALE. "
+                "Trustee page also shows the billing history confirming the tax-sale acquisition."
             ),
             "red_flags": (
-                "Registry owner is a private party (the county no longer holds it — already sold). "
-                "Status in the portal is not FOR SALE (under contract, withdrawn, or pending). "
-                "Property not found in the portal at all (our data may be stale)."
+                "Trustee page shows a PRIVATE owner (county no longer holds it — already sold; our data "
+                "is stale). Status in the ePropertyPlus portal is not FOR SALE (under contract or withdrawn). "
+                "Property not found in the portal at all."
             ),
         },
         "mmlba": {
             "valid": (
-                "Property is on MMLBA's available-properties list at mmlba.org/property-sales/. "
-                "Assessor registry owner is 'MEMPHIS METROPOLITAN LAND BANK AUTHORITY' (or close variant) — "
-                "this confirms the city genuinely holds the title, acquired for blight removal and "
-                "sold to community developers at a discount."
+                "On the Trustee page: PRIMARY OWNER should read 'MEMPHIS METROPOLITAN LAND BANK AUTHORITY' "
+                "(or close variant). Property should appear on the MMLBA property-sales page "
+                "(https://mmlba.org/property-sales/) — search by address in the gallery. "
+                "This confirms the city holds the title, acquired for blight removal."
             ),
             "red_flags": (
-                "Registry owner is not MMLBA (already sold to a private buyer — our data is stale). "
+                "Trustee page shows a private owner (already sold to a private buyer — our data is stale). "
                 "Property is not on the MMLBA available list (sold, withdrawn, or never listed). "
-                "Assessor shows a recent transfer date (title changed hands after our scrape)."
+                "Trustee shows a recent transfer date after our scrape date."
             ),
         },
     }
@@ -303,25 +331,25 @@ def _make_shelby_market() -> dict:
             "Memphis MMLBA": "land_bank_inventory",
         },
         "registry_link": registry_link,
-        "registry_label": "Shelby County Assessor — Parcel Registry",
+        "registry_label": "Shelby County Trustee — One-Click Parcel Page",
         "registry_search_hint": (
-            "Direct link attempts to open the Assessor record for parcel {parcel}. "
-            "If it doesn't load, paste the parcel into the ReGIS viewer "
-            "(https://gis.shelbycountytn.gov/) or the Register of Deeds search "
-            "(https://search.register.shelby.tn.us/search/index.php). "
-            "The 14-digit parcel number is the authoritative ID."
+            "Direct link opens the Trustee parcel page for {parcel} — ONE page shows owner, "
+            "tax balance, billing history, and (when applicable) the Tax Sale notice. "
+            "If native_parcel_id is not yet populated (link goes to the search page instead), "
+            "type the street number + street name (no suffix) into the PropertyClient search form. "
+            "Backup links: REGISTER GIS and ASSESSOR GIS are linked from the Trustee parcel page itself."
         ),
         "registry_look_for": (
-            "(1) Owner name on the page should match our stored owner. "
-            "(2) Situs address should match our stored address. "
-            "(3) For tax_deed leads: owner should be a PRIVATE party (individual or LLC) — "
-            "if it already says 'SHELBY COUNTY TAX SALE' the county took it and it belongs in the land-bank category. "
-            "(4) For land_bank leads: owner should include 'SHELBY COUNTY TAX SALE' or 'MEMPHIS METROPOLITAN LAND BANK'. "
-            "(5) Look for a transfer date — if a new private owner appears after our scrape date, the lead is gone. "
-            "Backup parcel lookup links: "
-            "ReGIS viewer https://gis.shelbycountytn.gov/ · "
-            "Register of Deeds https://search.register.shelby.tn.us/search/index.php · "
-            "Assessor https://www.assessormelvinburgess.com/"
+            "On the Trustee parcel page: "
+            "(1) PRIMARY OWNER should match our stored owner_name. "
+            "(2) LOCATION / ADDRESS should match our stored situs address. "
+            "(3) TAX DUE / TOTAL BALANCE > $0 = delinquent (expected for tax_deed). "
+            "$0 balance on a tax_deed = owner paid off; lead may be dead. "
+            "(4) For tax_deed: look for the 'TAX SALE PROPERTY NOTICE / Tax Sale ID: TS####' block — "
+            "this is the definitive proof it is scheduled for tax sale. No block = not (yet) scheduled. "
+            "(5) For land_bank: owner should read 'SHELBY COUNTY TAX SALE...' or similar. "
+            "(6) For MMLBA: owner should read 'MEMPHIS METROPOLITAN LAND BANK AUTHORITY'. "
+            "(7) The page has external links to REGISTER GIS and ASSESSOR GIS for deed history."
         ),
         "source_link": source_link,
         "offmarket_links": offmarket_links,
@@ -343,6 +371,7 @@ _SELECT_COLS = """
     (CURRENT_DATE - l.first_seen_at::date) AS lead_age_days,
     p.owner_name, p.current_market_value, p.current_tax_balance,
     p.land_use_code, p.last_sale_date, p.last_sale_price,
+    p.native_parcel_id,
     CURRENT_DATE AS today
 """
 
@@ -388,7 +417,9 @@ def _source_and_check(r: asyncpg.Record, market: dict) -> tuple[str, str]:
         addr_hint = "address should match"
 
     registry_label = market["registry_label"].split(" — ")[0]  # short label for console
-    src = market["source_link"](sig, parcel, case, r["sale_date"], r["property_address"])
+    native_parcel_id = r["native_parcel_id"] if "native_parcel_id" in r.keys() else None
+    src = market["source_link"](sig, parcel, case, r["sale_date"], r["property_address"],
+                                native_parcel_id=native_parcel_id)
 
     if market["state"] == "OH":
         # Cuyahoga-specific console CHECK lines (preserving original behavior)
@@ -412,23 +443,24 @@ def _source_and_check(r: asyncpg.Record, market: dict) -> tuple[str, str]:
         else:
             chk = f"(1) MyPlace parcel {parcel} exists  (2) Redfin/Zillow check  -- {addr_hint}"
     else:
-        # Shelby console CHECK lines
+        # Shelby console CHECK lines — Trustee page is the universal verifier
+        trustee_url = src if "shelbycountytrustee.com/Parcel" in src else "https://apps2.shelbycountytrustee.com/PropertyClient"
         if sig == "tax_deed":
-            chk = (f"(1) Parcel {parcel} on Trustee tax-sale list (TS code {case or '?'})  "
-                   f"(2) Assessor owner = PRIVATE party (not county/land bank)  "
+            chk = (f"(1) Trustee page: TAX DUE > $0 AND 'Tax Sale Property Notice' block present (TS code {case or '?'})  "
+                   f"(2) PRIMARY OWNER = private party (not county/land bank)  "
                    f"(3) Redfin/Zillow off-market = good (pre-auction)  -- {addr_hint}")
         elif sig == "land_bank_inventory":
             source_site = (r["source_site"] or "")
             if "MMLBA" in source_site:
-                chk = (f"(1) On MMLBA available list (mmlba.org)  "
-                       f"(2) Assessor owner = 'MEMPHIS METROPOLITAN LAND BANK AUTHORITY'  "
+                chk = (f"(1) Trustee page: PRIMARY OWNER = 'MEMPHIS METROPOLITAN LAND BANK AUTHORITY'  "
+                       f"(2) On MMLBA available list (mmlba.org/property-sales/)  "
                        f"(3) Redfin/Zillow off-market = expected (city-owned)  -- {addr_hint}")
             else:
-                chk = (f"(1) On Shelby Land Bank portal (parcel {parcel})  "
-                       f"(2) Assessor owner = 'SHELBY COUNTY TAX SALE' or similar  "
+                chk = (f"(1) Trustee page: PRIMARY OWNER = 'SHELBY COUNTY TAX SALE' or similar  "
+                       f"(2) On Shelby Land Bank portal (ePropertyPlus — search parcel {parcel})  "
                        f"(3) Redfin/Zillow off-market = expected (county-owned)  -- {addr_hint}")
         else:
-            chk = f"(1) Assessor parcel {parcel} exists  (2) Redfin/Zillow check  -- {addr_hint}"
+            chk = f"(1) Trustee page: parcel {parcel} exists, owner matches  (2) Redfin/Zillow check  -- {addr_hint}"
 
     return src, chk
 
@@ -499,6 +531,7 @@ def _layers(r: asyncpg.Record, market: dict) -> dict:
     land_use_code = (r["land_use_code"] or "")
     is_commercial = land_use_code.startswith("4") if land_use_code else False
     is_vacant_land = land_use_code.startswith("5") and addr_status == "no_street_number"
+    native_parcel_id = r["native_parcel_id"] if "native_parcel_id" in r.keys() else None
 
     first_seen_label = "—"
     if r["lead_age_days"] is not None:
@@ -510,7 +543,8 @@ def _layers(r: asyncpg.Record, market: dict) -> dict:
     if market["state"] == "OH":
         layer1 = _build_layer1_cuyahoga(r, sig, parcel, case, first_seen_label)
     else:
-        layer1 = _build_layer1_shelby(r, sig, source_site, parcel, case, first_seen_label, vguide)
+        layer1 = _build_layer1_shelby(r, sig, source_site, parcel, case, first_seen_label,
+                                      vguide, native_parcel_id=native_parcel_id)
 
     # ---- Layer 2: county registry ----
     last_sale_label = "(not enriched yet)"
@@ -520,7 +554,8 @@ def _layers(r: asyncpg.Record, market: dict) -> dict:
         else:
             last_sale_label = str(r["last_sale_date"])
 
-    registry_url = market["registry_link"](parcel, r["property_address"])
+    registry_url = market["registry_link"](parcel, r["property_address"],
+                                           native_parcel_id=native_parcel_id)
     registry_search = market["registry_search_hint"].format(parcel=parcel)
 
     layer2 = {
@@ -539,6 +574,8 @@ def _layers(r: asyncpg.Record, market: dict) -> dict:
         "backup_links": (
             None if market["state"] == "OH"
             else [
+                ("Trustee Search (type address if no parcel link)",
+                 "https://apps2.shelbycountytrustee.com/PropertyClient"),
                 ("ReGIS Parcel Viewer", "https://gis.shelbycountytn.gov/"),
                 ("Register of Deeds", "https://search.register.shelby.tn.us/search/index.php"),
                 ("Assessor (main)", "https://www.assessormelvinburgess.com/"),
@@ -762,29 +799,51 @@ def _build_layer1_cuyahoga(r: asyncpg.Record, sig: str, parcel: str,
 
 def _build_layer1_shelby(r: asyncpg.Record, sig: str, source_site: str,
                           parcel: str, case: str | None, first_seen_label: str,
-                          vguide: dict) -> dict:
-    """Shelby (Memphis, TN) Layer 1 — per signal type."""
+                          vguide: dict, *, native_parcel_id: str | None = None) -> dict:
+    """Shelby (Memphis, TN) Layer 1 — per signal type.
+
+    The Shelby County Trustee parcel page is the UNIVERSAL verifier for tax_deed.
+    It shows PRIMARY OWNER, TAX DUE, BILLING HISTORY, and the TAX SALE PROPERTY
+    NOTICE block (when scheduled) — everything needed to confirm a real pre-auction lead.
+    The URL requires the native spaced PARCELID (native_parcel_id), not the 14-char canonical.
+    """
+    trustee_url = _trustee_parcel_url(native_parcel_id)
+    trustee_fallback = "https://apps2.shelbycountytrustee.com/PropertyClient"
+    trustee_search_hint = (
+        f"type street number + street name (no suffix) — e.g. '{(r['property_address'] or '').split(',')[0]}'"
+        if not trustee_url else ""
+    )
+    native_id_label = native_parcel_id or "(not yet populated — re-run shelby_parcels spine)"
+
     if sig == "tax_deed":
         guide = vguide.get("tax_deed", {})
+        layer_url = trustee_url or trustee_fallback
+        search_for = (
+            f"Click the button to open the Trustee parcel page directly. "
+            f"On the page, look for the 'TAX SALE PROPERTY NOTICE' block — it shows "
+            f"Tax Sale ID '{case or '?'}' when this parcel is scheduled. "
+            f"TAX DUE / TOTAL BALANCE should be > $0."
+            if trustee_url else
+            f"No direct link yet (native_parcel_id not populated). Open the Trustee PropertyClient "
+            f"search at {trustee_fallback} and {trustee_search_hint}. "
+            f"Look for the 'TAX SALE PROPERTY NOTICE' block with Tax Sale ID '{case or '?'}'."
+        )
         return {
-            "title": "Shelby County Trustee — Tax Sale (Pre-Auction / Delinquent Tax)",
-            "url": "https://www.shelbycountytrustee.com/161/Properties-Available-for-Sale",
-            "search_for": (
-                f"Open the Trustee's Properties Available for Sale page. "
-                f"Search or Ctrl+F for parcel {parcel} or TS code '{case or '?'}'. "
-                f"The TS code (e.g. TS2302) identifies the tax-sale batch."
-            ),
+            "title": "Shelby County Trustee — Parcel Page (Tax Sale Confirmation)",
+            "url": layer_url,
+            "search_for": search_for,
             "look_for": (
                 f"{guide.get('valid', '')} "
                 f"Red flags: {guide.get('red_flags', '')}"
             ),
             "stored": [
-                ("Parcel (14-digit)", parcel),
+                ("Parcel (14-digit canonical)", parcel),
+                ("Native Parcel ID (for Trustee URL)", native_id_label),
                 ("TS Code / Case Number", case or "—"),
                 ("Source Site", source_site),
                 ("Property Address", r["property_address"] or "—"),
                 ("First Seen By Us", first_seen_label),
-                ("Owner (Assessor — should be private party)", r["owner_name"] or "(not enriched)"),
+                ("Owner (Trustee — should be private party)", r["owner_name"] or "(not enriched)"),
             ],
         }
     elif sig == "land_bank_inventory" and "MMLBA" in source_site:
@@ -793,19 +852,21 @@ def _build_layer1_shelby(r: asyncpg.Record, sig: str, source_site: str,
             "title": "MMLBA — Memphis Metropolitan Land Bank Authority",
             "url": "https://mmlba.org/property-sales/",
             "search_for": (
-                f"Open the MMLBA property-sales page. Search or Ctrl+F for "
-                f"address '{r['property_address']}' or parcel {parcel}."
+                f"Open the MMLBA property-sales gallery and search / Ctrl+F for "
+                f"address '{r['property_address']}'. Then verify the owner on the Trustee parcel page "
+                f"(Layer 2 below) to confirm MMLBA holds the title."
             ),
             "look_for": (
                 f"{guide.get('valid', '')} "
                 f"Red flags: {guide.get('red_flags', '')}"
             ),
             "stored": [
-                ("Parcel (14-digit)", parcel),
+                ("Parcel (14-digit canonical)", parcel),
+                ("Native Parcel ID (for Trustee URL)", native_id_label),
                 ("Source Site", source_site),
                 ("Property Address", r["property_address"] or "—"),
                 ("First Seen By Us", first_seen_label),
-                ("Owner (Assessor — should be MMLBA)", r["owner_name"] or "(not enriched)"),
+                ("Owner (Trustee — should be MMLBA)", r["owner_name"] or "(not enriched)"),
             ],
         }
     elif sig == "land_bank_inventory":
@@ -814,29 +875,38 @@ def _build_layer1_shelby(r: asyncpg.Record, sig: str, source_site: str,
             "title": "Shelby County Land Bank — ePropertyPlus Portal",
             "url": "https://public-sctn.epropertyplus.com/landmgmtpub/app/base/landing",
             "search_for": (
-                f"Open the Shelby County Land Bank portal. Search for parcel {parcel} "
-                f"or address '{r['property_address']}'. Properties listed FOR SALE are the active inventory."
+                f"Open the Shelby County Land Bank portal and search for parcel {parcel} "
+                f"or address '{r['property_address']}'. Properties listed FOR SALE are the active inventory. "
+                f"Then verify ownership on the Trustee parcel page (Layer 2 below)."
             ),
             "look_for": (
                 f"{guide.get('valid', '')} "
                 f"Red flags: {guide.get('red_flags', '')}"
             ),
             "stored": [
-                ("Parcel (14-digit)", parcel),
+                ("Parcel (14-digit canonical)", parcel),
+                ("Native Parcel ID (for Trustee URL)", native_id_label),
                 ("Source Site", source_site),
                 ("Property Address", r["property_address"] or "—"),
                 ("First Seen By Us", first_seen_label),
-                ("Owner (Assessor — should be Shelby County)", r["owner_name"] or "(not enriched)"),
+                ("Owner (Trustee — should be Shelby County)", r["owner_name"] or "(not enriched)"),
             ],
         }
     else:
+        layer_url = trustee_url or trustee_fallback
         return {
-            "title": "Source not classified (Shelby)",
-            "url": "https://www.assessormelvinburgess.com/",
-            "search_for": f"Paste parcel {parcel} in the Assessor search.",
-            "look_for": "Confirm the parcel exists and address matches.",
+            "title": "Shelby County Trustee — Parcel Page",
+            "url": layer_url,
+            "search_for": (
+                f"Open the Trustee parcel page and confirm owner + address match."
+                if trustee_url else
+                f"Open Trustee PropertyClient at {trustee_fallback} and {trustee_search_hint}."
+            ),
+            "look_for": "Confirm the parcel exists and address / owner match our stored data.",
             "stored": [
                 ("Signal Type", sig or "—"),
+                ("Parcel (14-digit canonical)", parcel),
+                ("Native Parcel ID (for Trustee URL)", native_id_label),
                 ("Source Site", source_site),
             ],
         }
@@ -1211,8 +1281,9 @@ def _print_console(rows: list, market: dict) -> None:
         zip_ = r["property_zip"]
         addr = r["property_address"] or ""
         parcel = r["source_listing_id"] or ""
+        native_parcel_id = r["native_parcel_id"] if "native_parcel_id" in r.keys() else None
         zillow_url, redfin_url = market["offmarket_links"](addr, city, zip_)
-        registry_url = market["registry_link"](parcel, addr)
+        registry_url = market["registry_link"](parcel, addr, native_parcel_id=native_parcel_id)
         registry_short = market["registry_label"].split(" — ")[0]
         print(f"[{i:>2}] {verdict:<6} {r['signal_type']:<26} {addr}, {city} ({parcel}){sd}{bid}")
         print(f"      {' | '.join(notes)}")

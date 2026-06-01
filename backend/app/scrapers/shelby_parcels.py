@@ -182,14 +182,26 @@ def _attrs_to_parcel(attrs: dict[str, Any]) -> dict[str, Any] | None:
 
     Returns None if the row lacks a usable parcel number (skip silently).
     """
+    # PARCELID is the native spaced form: e.g. '042035  00007' (MAP + 2 spaces + 5-char group).
+    # Store it verbatim as native_parcel_id — spaces are required by the Trustee URL.
+    # Do NOT strip the internal spaces; only strip leading/trailing whitespace from the raw value.
+    parcelid_raw = attrs.get("PARCELID") or ""
+    # Strip only outer whitespace; preserve the internal double-space separator.
+    parcelid_stripped = parcelid_raw.strip() if parcelid_raw else ""
+
     # Prefer PARCELID (spaced) for normalization; fall back to PAID (compact)
-    raw_id = (attrs.get("PARCELID") or attrs.get("PAID") or "").strip()
+    raw_id = parcelid_stripped or (attrs.get("PAID") or "").strip()
     if not raw_id:
         return None
 
     parcel_number = normalize_parcel_number(raw_id)
     if not parcel_number:
         return None
+
+    # native_parcel_id: the verbatim spaced PARCELID from ReGIS (e.g. '042035  00007').
+    # Used to build one-click Shelby County Trustee URLs in verify_listings.py.
+    # NULL when PARCELID is absent (fallback to PAID path — should be rare).
+    native_parcel_id = parcelid_stripped if parcelid_stripped else None
 
     # Situs address: build from PAR_ADDR1 or components, append city+zip
     situs = _build_situs_address(attrs)
@@ -204,6 +216,7 @@ def _attrs_to_parcel(attrs: dict[str, Any]) -> dict[str, Any] | None:
 
     return {
         "parcel_number": parcel_number,
+        "native_parcel_id": native_parcel_id,  # spaced PARCELID for Trustee URL; NULL if absent
         "owner_name": _build_owner_name(attrs),
         "owner_mailing_address": _build_owner_mailing(attrs),
         "situs_address": situs_full,

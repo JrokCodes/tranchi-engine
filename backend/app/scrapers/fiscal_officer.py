@@ -999,6 +999,10 @@ async def upsert_parcels(
                     "SELECT parcel_number FROM tranchi.parcels WHERE parcel_number = $1",
                     hit["parcel_number"],
                 )
+                # native_parcel_id: Shelby County spaced PARCELID for Trustee URL.
+                # Present only on shelby_parcels hits; Cuyahoga hits won't have it → NULL.
+                native_parcel_id = hit.get("native_parcel_id") or None
+
                 if existing:
                     await conn.execute(
                         """
@@ -1013,7 +1017,8 @@ async def upsert_parcels(
                             current_tax_balance  = COALESCE($9, current_tax_balance),
                             delinquent_flag      = COALESCE($10, delinquent_flag),
                             last_seen_at         = $11,
-                            source_url           = $12
+                            source_url           = $12,
+                            native_parcel_id     = COALESCE($13, native_parcel_id)
                         WHERE parcel_number = $1
                         """,
                         hit["parcel_number"],
@@ -1028,6 +1033,7 @@ async def upsert_parcels(
                         _is_delinquent(hit),
                         now,
                         hit.get("source_url"),
+                        native_parcel_id,
                     )
                     counts["updated"] += 1
                 else:
@@ -1038,13 +1044,15 @@ async def upsert_parcels(
                             property_class, land_use_code, neighborhood,
                             school_district, current_market_value,
                             current_tax_balance, delinquent_flag,
-                            first_seen_at, last_seen_at, source_url
+                            first_seen_at, last_seen_at, source_url,
+                            native_parcel_id
                         ) VALUES (
                             $1, $2, $3,
                             $4, $5, $6,
                             $7, $8,
                             $9, $10,
-                            $11, $11, $12
+                            $11, $11, $12,
+                            $13
                         )
                         ON CONFLICT (parcel_number) DO NOTHING
                         """,
@@ -1060,6 +1068,7 @@ async def upsert_parcels(
                         _is_delinquent(hit),
                         now,
                         hit.get("source_url"),
+                        native_parcel_id,
                     )
                     counts["inserted"] += 1
             except Exception as exc:
