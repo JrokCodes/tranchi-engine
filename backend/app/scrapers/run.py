@@ -701,7 +701,13 @@ async def main() -> int:
         if args.site:
             scraper_keys = [args.site]
         else:
-            scraper_keys = list(_SCRAPERS.keys())
+            # Heavy registry sweeps that change slowly are EXCLUDED from the every-3h
+            # full run and scheduled on their own (weekly) cron — running a 353K-parcel
+            # ReGIS sweep every 3h is wasteful and not "laying low". Listings still
+            # refresh every 3h; _ensure_parcels_for_listings backfills stubs between
+            # weekly spine sweeps so coverage stays 100%. Run explicitly via --site.
+            _FULL_RUN_SKIP = {"shelby_parcels"}
+            scraper_keys = [k for k in _SCRAPERS.keys() if k not in _FULL_RUN_SKIP]
 
         if args.dry_run:
             logger.info("DRY RUN mode — no data will be written to the database.")
