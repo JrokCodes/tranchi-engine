@@ -220,34 +220,126 @@ def normalize_address(addr: str) -> str:
 
 
 def normalize_parcel_number(raw: str | None) -> str | None:
-    """Normalize a Cuyahoga parcel number to the display format DDD-NN-NNN.
+    """Normalize a parcel number to a single canonical form per county/state.
 
-    Cuyahoga uses two formats in active use:
-      - Display: '110-19-068' (Sheriff, Fiscal Officer, Land Bank)
-      - Compact: '11019068'   (Cleveland Open Data / code violations)
+    CUYAHOGA (OH) — canonical form: DDD-NN-NNN (e.g. '110-19-068')
+      Two formats in active use:
+        Display: '110-19-068'  (Sheriff, Fiscal Officer, Land Bank)
+        Compact: '11019068'    (Cleveland Open Data / code violations)
+      Detection: purely numeric after stripping non-digits, 8 digits → Cuyahoga.
 
-    Both refer to the same parcel. This function normalizes both to display
-    format so cross-source joins on parcel_number work without format mismatches.
+    SHELBY COUNTY (TN / Memphis) — canonical form: 14-char alphanumeric
+      (e.g. '07204700000160').
 
-    Logic:
-      - Strip all non-digit characters.
-      - If exactly 8 digits: format as DDD-NN-NNN (3-2-3 split).
-      - If already hyphenated and matches DDD-NN-NNN: return as-is (idempotent).
-      - Otherwise: return the cleaned input unchanged (don't crash on edge cases).
+      Three source formats all normalize to the same 14-char form:
+        ReGIS PARCELID / PARID (spaced):  '072047  00016'
+          → MAP segment + whitespace + GROUP segment
+        ReGIS PAID (compact, numeric-only): '07204700016' (10–11 digits: MAP6 + GROUP)
+        Tax Sale CSV Alt_Parcel / ePropertyPlus parcelNumber: '07204700000160' (14 chars)
+
+      Canonical construction (verified against Tax CSV Alt_Parcel + ePropertyPlus
+      parcelNumber as authoritative sources, 17 real-parcel cases including all
+      alpha-MAP and alpha-GROUP variants from live ReGIS + Tax Sale data):
+
+          canonical = MAP.ljust(6,'0') + '0' + grp_numeric.zfill(6) + qualifier
+
+        where:
+          MAP         = the prefix segment before the whitespace gap, right-padded
+                        to exactly 6 chars with '0' (ljust). Numeric MAPs like
+                        '072047' are already 6; short alpha-MAPs like 'D0217' (5)
+                        become 'D02170'. DO NOT left-pad alpha MAPs with '0' — that
+                        produces '0D0217...' which does not match any authoritative
+                        source and breaks FK joins.
+          '0'         = fixed structural separator at position [6].
+          grp_numeric = GROUP characters with any trailing alpha qualifier stripped.
+                        E.g. group '00514C' → grp_numeric='00514', qualifier='C'.
+                        Group 'A00640' (leading alpha) → grp_numeric='A00640', qualifier='0'.
+          qualifier   = trailing alpha char of GROUP if present (e.g. 'C' in '00514C'),
+                        else '0' (whole-parcel qualifier).
+          zfill(6)    = left-zero-pad grp_numeric to 6 chars.
+
+      Real traced examples (Tax CSV Alt_Parcel is authoritative):
+        '072047  00016' → '07204700000160'  (numeric MAP+GROUP, qualifier='0')
+        '074037 H00081' → '0740370H000810'  (alpha-GROUP prefix, qualifier='0')
+        'D0217   00225' → 'D0217000002250'  (alpha-MAP 5-char, right-padded → 'D02170')
+        'C0244  A00640' → 'C024400A006400'  (alpha-MAP 5-char + alpha-GROUP)
+        'D0222   00514C'→ 'D022200000514C'  (alpha-MAP 5-char + trailing qualifier 'C')
+
+      INVARIANT: every Shelby source (tax-sale, land-bank, MMLBA) MUST call
+      normalize_parcel_number() before using any parcel ID as an FK into
+      tranchi.parcels or tranchi.signals. The same silent join-failure that bit
+      Cuyahoga (fiscal_officer.py) will bite Shelby if you skip this. Downstream
+      builders: use Tax CSV Alt_Parcel or ePropertyPlus parcelNumber (both already
+      14-char canonical) in preference to the spaced PARCELID or compact PAID.
+      Alpha-MAP PAID compact forms (e.g. 'D021700225') cannot be reconstructed
+      to 14-char without the spaced form — they fall through to the unchanged
+      return; if you only have PAID for an alpha-MAP parcel, use the spaced
+      PARCELID from ReGIS or the Alt_Parcel from the tax CSV instead.
+
+    Detection logic:
+      - Matches DDD-NN-NNN exactly → Cuyahoga (idempotent).
+      - Purely numeric after strip, 8 digits → Cuyahoga compact.
+      - Exactly 14 alphanumeric chars, no spaces → already canonical (idempotent).
+      - Contains internal whitespace (two non-space groups) → Shelby spaced form.
+      - Purely numeric, 10–11 digits → Shelby PAID compact (numeric-MAP only).
+      - Anything else → return uppercased as-is (don't crash on edge cases).
     """
     if raw is None:
         return None
     stripped = raw.strip()
     if not stripped:
         return None
-    # Already in display format
+
+    # ── Cuyahoga (OH): DDD-NN-NNN ─────────────────────────────────────────────
     if re.match(r"^\d{3}-\d{2}-\d{3}$", stripped):
         return stripped
-    digits = re.sub(r"\D", "", stripped)
-    if len(digits) == 8:
-        return f"{digits[:3]}-{digits[3:5]}-{digits[5:]}"
-    # Can't normalize — return cleaned input unchanged
-    return stripped
+    digits_only = re.sub(r"\D", "", stripped)
+    if len(digits_only) == 8:
+        return f"{digits_only[:3]}-{digits_only[3:5]}-{digits_only[5:]}"
+
+    # ── Shelby County (TN): 14-char canonical ────────────────────────────────
+    # Already canonical: exactly 14 alphanumeric chars, no spaces or hyphens.
+    if re.match(r"^[A-Z0-9]{14}$", stripped, re.IGNORECASE):
+        return stripped.upper()
+
+    # Spaced form: MAP_segment + whitespace + GROUP_segment
+    # MAP is 4–7 chars (numeric e.g. '072047', or alpha e.g. 'D0217', 'M0115H').
+    # GROUP is 5–7 chars (numeric e.g. '00016', alpha-prefix e.g. 'H00081',
+    # trailing-qualifier e.g. '00514C', or BOTH e.g. 'H00043C' → '0740370H00043C').
+    spaced_m = re.match(r"^([A-Z0-9]{4,7})\s+([A-Z0-9]{5,7})$", stripped, re.IGNORECASE)
+    if spaced_m:
+        map_part = spaced_m.group(1).upper()
+        grp_part = spaced_m.group(2).upper()
+
+        # MAP: RIGHT-pad to 6 chars with '0' (ljust).
+        # Numeric '072047' is already 6; short alpha 'D0217' → 'D02170'.
+        # NEVER left-pad alpha MAPs — '0D0217' is wrong and breaks FK joins.
+        map_padded = map_part.ljust(6, "0")[:6]
+
+        # GROUP: if the last char is alpha it is the sub-parcel qualifier (e.g. 'C');
+        # strip it and zero-pad the numeric portion. Otherwise qualifier = '0'.
+        if grp_part and grp_part[-1].isalpha():
+            qualifier = grp_part[-1]
+            grp_numeric = grp_part[:-1]
+        else:
+            qualifier = "0"
+            grp_numeric = grp_part
+
+        grp_padded = grp_numeric.zfill(6)
+        return f"{map_padded}0{grp_padded}{qualifier}"
+
+    # PAID compact: purely numeric, 10–11 digits (numeric MAP6 + GROUP4or5).
+    # Alpha-MAP PAID forms (e.g. 'D021700225') are not purely numeric, so they
+    # fall through to the unchanged return below — cannot reconstruct without
+    # knowing which chars belong to MAP vs GROUP in an alpha-MAP compact string.
+    if re.match(r"^\d{10,11}$", stripped):
+        map_part = stripped[:6]
+        grp_part = stripped[6:]
+        grp_padded = grp_part.zfill(6)
+        return f"{map_part}0{grp_padded}0"
+
+    # Can't normalize — return uppercased input unchanged (don't crash).
+    return stripped.upper()
 
 
 def _utcnow() -> datetime:
@@ -428,6 +520,23 @@ async def _upsert_one(
             """,
             listing.source_site,
             listing.case_number,
+        )
+    elif norm_parcel:
+        # Parcel-primary dedup (no case_number): match by (source_site, parcel).
+        # Prevents transient duplicates when the same parcel is re-scraped across
+        # cycles for sources that don't use case numbers (tax-sale, land-bank, MMLBA).
+        # The cross-source dedup in run.py already uses parcel as cluster key;
+        # this keeps the per-source row count from inflating on every scrape.
+        # Only applies when norm_parcel is set — address+sale_date fallback still
+        # fires below for sources that set neither case_number nor source_listing_id.
+        existing_id = await conn.fetchval(
+            """
+            SELECT id FROM tranchi.listings
+            WHERE source_site = $1 AND source_listing_id = $2
+            LIMIT 1
+            """,
+            listing.source_site,
+            norm_parcel,
         )
     else:
         existing_id = await conn.fetchval(

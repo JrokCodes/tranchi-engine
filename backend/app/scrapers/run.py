@@ -65,6 +65,10 @@ from app.scrapers.fiscal_officer import (  # noqa: E402
     FiscalOfficerScraper,
     upsert_parcels as _fo_upsert_parcels,
 )
+from app.scrapers.shelby_parcels import ShelbyParcelsScraper  # noqa: E402
+from app.scrapers.shelby_tax_sale import ShelbyTaxSaleScraper  # noqa: E402
+from app.scrapers.shelby_county_landbank import ShelbyCountyLandBankScraper  # noqa: E402
+from app.scrapers.shelby_mmlba import MemphisMMLBAScraper  # noqa: E402
 from app.scrapers.landbank import LandBankScraper  # noqa: E402
 from app.scrapers.models import ScrapeResult  # noqa: E402
 from app.scrapers.prefilter import prefilter  # noqa: E402
@@ -87,6 +91,10 @@ _SCRAPERS: dict[str, type] = {
     "dln": DLNScraper,
     "forfeited_land": ForfeitedLandScraper,   # tax-deed listings (ArcGIS)
     "delinquent_tax": DelinquentTaxScraper,   # tax-distress SIGNAL (ArcGIS)
+    "shelby_parcels": ShelbyParcelsScraper,   # Shelby County (TN) registry spine (ArcGIS)
+    "shelby_tax_sale": ShelbyTaxSaleScraper,           # Shelby (TN) tax-deed pre-sale catalog (CSV)
+    "shelby_county_landbank": ShelbyCountyLandBankScraper,  # Shelby (TN) County land bank (ePropertyPlus)
+    "shelby_mmlba": MemphisMMLBAScraper,               # Memphis (TN) City land bank MMLBA (Airtable)
 }
 
 
@@ -160,6 +168,11 @@ async def _run_scraper(
         # only, ~26 page fetches). enrich_detail=True does a per-parcel detail
         # POST for all ~20K parcels which takes hours.
         scraper = scraper_cls(enrich_detail=False)
+    elif scraper_key == "shelby_parcels":
+        # Full sweep of Shelby County (TN) ReGIS at 500/page, 1 req/sec.
+        # ~353K parcels = ~707 pages = ~12 minutes. max_parcels=None = full sweep.
+        # For a test run: ShelbyParcelsScraper(max_parcels=500)
+        scraper = scraper_cls()
     elif scraper_key == "probate":
         # Probate manages its own cursor (tranchi.probate_cursor) and signal
         # writes internally, so it needs the pool + dry_run flag at construction.
@@ -178,14 +191,18 @@ async def _run_scraper(
     try:
         logger.info("Starting scraper: %s", site_name)
 
-        if scraper_key == "fiscal_officer":
+        if scraper_key in ("fiscal_officer", "shelby_parcels"):
             # ── Registry path ──────────────────────────────────────────────────
-            # fiscal_officer is the parcel identity spine, not a deal-listing feed.
+            # Registry scrapers are parcel identity spines, not deal-listing feeds.
             # We populate tranchi.parcels only; tranchi.listings is never touched.
-            # upsert_signals_from_parcels is SKIPPED here: enrich_detail=False means
-            # tax-distress flags (flag_foreclosure, flag_cert_pending, etc.) are not
-            # fetched. Distress-signal enrichment belongs in a separate targeted job
-            # that runs with enrich_detail=True on a filtered subset of parcels.
+            #
+            # fiscal_officer: Cuyahoga County (OH) — MyPlace A-Z sweep.
+            # shelby_parcels: Shelby County (TN / Memphis) — ReGIS ArcGIS layer.
+            #   Both call fetch_parcels() and feed hits into _fo_upsert_parcels().
+            #
+            # upsert_signals is SKIPPED for both: tax-distress flags are not
+            # fetched in the lightweight registry sweep. Distress-signal enrichment
+            # belongs in a separate targeted job.
             started_at = datetime.now(tz=timezone.utc)
             hits = await scraper.fetch_parcels()
             result.found = len(hits)
@@ -206,7 +223,7 @@ async def _run_scraper(
                 except Exception:
                     pass
 
-            # Write scrape_runs row so Sources dashboard shows fiscal_officer.
+            # Write scrape_runs row so Sources dashboard shows this registry source.
             if not dry_run:
                 completed_at = datetime.now(tz=timezone.utc)
                 final_status = "error" if result.errors > 0 and result.new_inserted == 0 else "success"

@@ -2,8 +2,14 @@
 Hard filter rules applied to every RawListing BEFORE database insert.
 
 Rules (intentionally loose — Marc: "pull everything, regardless of price"):
-  1. property_state must be "OH"
+  1. property_state must be in ALLOWED_STATES (active markets)
   2. property_address must be non-null and non-empty
+
+ALLOWED_STATES is an allowlist of the states we have live markets in. A new
+market in a new state MUST be added here or every one of its listings is
+silently rejected (passed=0) before the DB write — there is no error, just an
+empty feed. (This exact rule dropped 100% of the Shelby/TN listings until TN
+was added — see scrape_runs.filtered.)
 
 All Gotham-specific filters have been dropped:
   - No deposit ceiling (Marc: users filter on the Tranchi side)
@@ -17,6 +23,10 @@ from __future__ import annotations
 
 from app.scrapers.models import RawListing
 
+# Active-market states. Add a state here when a new market in that state ships,
+# or every listing from it is silently rejected before DB write.
+ALLOWED_STATES = {"OH", "TN"}
+
 
 def prefilter(listing: RawListing) -> tuple[bool, str | None]:
     """Return (passes, rejection_reason).
@@ -24,9 +34,9 @@ def prefilter(listing: RawListing) -> tuple[bool, str | None]:
     passes=True means the listing cleared all hard filters and should proceed
     to the DB upsert. passes=False means it should be discarded silently.
     """
-    # Rule 1: OH only
-    if listing.property_state and listing.property_state.upper() != "OH":
-        return False, f"state={listing.property_state!r} (not OH)"
+    # Rule 1: must be an active-market state (allowlist)
+    if listing.property_state and listing.property_state.upper() not in ALLOWED_STATES:
+        return False, f"state={listing.property_state!r} (not in {sorted(ALLOWED_STATES)})"
 
     # Rule 2: Address must be present
     if not listing.property_address or not listing.property_address.strip():

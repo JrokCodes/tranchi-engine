@@ -19,3 +19,5 @@ lxml==5.3.0
 # Playwright required by fiscal_officer.py for Tax By Year flag enrichment.
 # After pip install, run: playwright install chromium
 playwright>=1.43.0
+# msgpack required by shelby_mmlba.py to decode Airtable's binary XHR responses.
+msgpack>=1.0.8

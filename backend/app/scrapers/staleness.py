@@ -44,6 +44,11 @@ SOURCE_STALENESS: dict[str, StalenessPolicy] = {
     "Cuyahoga Forfeited Land": StalenessPolicy.FULL_RESCAN,
     "Cuyahoga Probate Court": StalenessPolicy.CURSOR,
     "Cuyahoga Sheriff Sales": StalenessPolicy.ARCHIVE,
+    # Shelby County, TN (Memphis) — all FULL_RESCAN: each re-pulls its whole live set
+    # every run, so a row absent this cycle is genuinely resolved (paid / sold / removed).
+    "Shelby County Tax Sale": StalenessPolicy.FULL_RESCAN,
+    "Shelby County Land Bank": StalenessPolicy.FULL_RESCAN,
+    "Memphis MMLBA": StalenessPolicy.FULL_RESCAN,
 }
 
 DEFAULT_POLICY = StalenessPolicy.FULL_RESCAN
