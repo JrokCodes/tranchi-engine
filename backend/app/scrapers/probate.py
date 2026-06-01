@@ -904,6 +904,7 @@ def _build_listing(
         decedent_name=decedent_name or None,
         case_title=case_title or None,
         decedent_dod=dod,
+        probate_internal_id=probate_internal_id,
     )
 
 

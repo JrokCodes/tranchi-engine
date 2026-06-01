@@ -67,6 +67,9 @@ class RawListing(BaseModel):
     decedent_name: str | None = None
     case_title: str | None = None
     decedent_dod: date | None = None
+    # ProWare internal case id (probate). Persisted so a case can be re-fetched by id
+    # (1 cheap request) instead of a fuzzy Case Search. NULL for non-probate.
+    probate_internal_id: int | None = None
 
 
 class RawSignal(BaseModel):
