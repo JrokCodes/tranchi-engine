@@ -45,9 +45,9 @@ except Exception:  # pragma: no cover
     asyncpg = None  # type: ignore
 
 from app.scrapers.base import SignalScraper
-from app.scrapers.db import canonical_address
+from app.scrapers.db import canonical_address, normalize_parcel_number
 from app.scrapers.models import RawSignal
-from app.scrapers.shelby_foreclosure import _resolve_parcels, _join_key
+from app.scrapers.shelby_foreclosure import _join_key, _street_zip
 from app.scrapers.user_agents import default_headers
 
 logger = logging.getLogger(__name__)
@@ -79,6 +79,31 @@ def _to_int(v: Any) -> int | None:
         return int(float(v))
     except (TypeError, ValueError):
         return None
+
+
+async def _build_spine_index(pool: Any) -> dict[str, set[str]]:
+    """Load the spine ONCE into {join_key: {parcel,...}}.
+
+    Evictions has thousands of distinct addresses; resolving each via shelby_foreclosure
+    ._resolve_parcels (ILIKE-ANY over the whole spine) is O(spine x patterns) and hangs.
+    An in-memory index keyed exactly like _resolve_parcels (house# + zip + street) is
+    O(spine + evictions). Ambiguous keys (>1 parcel) are kept and dropped at lookup.
+    """
+    spine: dict[str, set[str]] = {}
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT parcel_number, situs_address FROM tranchi.parcels "
+            "WHERE situs_address IS NOT NULL AND situs_address <> ''"
+        )
+    for r in rows:
+        s_street, s_zip = _street_zip(r["situs_address"])
+        skey = _join_key(s_street, s_zip)
+        if not skey:
+            continue
+        norm = normalize_parcel_number(r["parcel_number"])
+        if norm:
+            spine.setdefault(skey, set()).add(norm)
+    return spine
 
 
 class ShelbyEvictionsScraper(SignalScraper):
@@ -149,13 +174,13 @@ class ShelbyEvictionsScraper(SignalScraper):
                 rec["latest"] = fdate
                 rec["landlord"] = (r.get("first_named_plaintiff") or "").strip() or rec["landlord"]
 
-        # Resolve all distinct addresses to spine parcels (precision-first, unique-only).
-        keys = [(rec["street"], rec["zip5"]) for rec in agg.values()]
-        parcel_by_jkey = await _resolve_parcels(self.pool, keys)
+        # Resolve all distinct addresses against an in-memory spine index (unique-only).
+        spine = await _build_spine_index(self.pool)
 
         signals: list[RawSignal] = []
         for jkey, rec in agg.items():
-            parcel = parcel_by_jkey.get(jkey)
+            cands = spine.get(jkey)
+            parcel = next(iter(cands)) if cands and len(cands) == 1 else None
             if not parcel:
                 continue  # unresolved/ambiguous — can't HOT a parcel we can't identify
             latest = rec["latest"] or cutoff
