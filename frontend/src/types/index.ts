@@ -31,12 +31,12 @@ export type ListingStatus = 'active' | 'not_listed' | 'expired' | 'cancelled';
 export interface ApiListingItem {
   id: string;
   source_site: string;
-  signal_type: string;
+  signal_type: string | null;
   property_address: string;
-  property_city: string;
-  property_county: string;
+  property_city: string | null;
+  property_county: string | null;
   property_state: string;
-  property_zip: string;
+  property_zip: string | null;
   status: ListingStatus;
   sale_date: string | null;
   sec_sale_date: string | null;
@@ -47,6 +47,22 @@ export interface ApiListingItem {
   trustee_name: string | null;
   case_number: string | null;
   source_listing_id: string | null;
+  // Probate validity + decedent identity (null for non-probate; surfaced for the probate card).
+  case_status: string | null;
+  case_status_date: string | null;
+  match_method: string | null;
+  match_confidence: string | null;
+  match_score: number | null;
+  decedent_name: string | null;
+  case_title: string | null;
+  decedent_dod: string | null;
+  // TN tax-deed redemption lifecycle (null for non-tax_deed; dormant until parcels sell).
+  confirmation_order_date: string | null;
+  redemption_ends: string | null;
+  redemption_status: string | null;
+  redemption_window_days: number | null;
+  redemption_basis: string | null;
+  address_status: string | null;
   first_seen_at: string;
   last_seen_at: string;
   signal_count: number;
@@ -74,6 +90,7 @@ export interface ListingsResponse {
 
 export interface ApiParcel {
   parcel_number: string | null;
+  native_parcel_id: string | null;
   owner_name: string | null;
   situs_address: string | null;
   owner_mailing_address: string | null;

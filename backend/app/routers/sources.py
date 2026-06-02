@@ -32,6 +32,15 @@ _SOURCE_META: dict[str, tuple[str | None, str]] = {
     "Cleveland Code Violations": ("https://data.clevelandohio.gov/", "signal"),
     "Cuyahoga Delinquent Tax": ("https://cuyahogacounty.gov/treasury/delinquency", "signal"),
     "Cuyahoga Fiscal Officer": ("https://myplace.cuyahogacounty.gov", "registry"),
+    # Shelby County, TN (Memphis) — first market outside Ohio.
+    "Shelby County Tax Sale": ("https://www.shelbycountytrustee.com/191/Tax-Sale-Schedule", "deal"),
+    "Shelby County Land Bank": ("https://landbank.shelbycountytn.gov/", "deal"),
+    "Memphis MMLBA": ("https://mmlba.org/property-sales/", "deal"),
+    "Shelby County Foreclosure": ("https://www.tnforeclosurenotices.com/results/counties/shelby/", "deal"),
+    "Shelby Probate Court": ("https://prdata.shelbycountytn.gov/prweb/", "deal"),
+    "Shelby Delinquent Tax": ("https://www.shelbycountytrustee.com/259/Delinquent-Realty-Lawsuit-List", "signal"),
+    "Shelby Evictions": ("https://data.midsouth.io/", "signal"),
+    "Shelby County Parcels (ReGIS)": ("https://scgis.shelbycountytn.gov/", "registry"),
 }
 
 

@@ -1,8 +1,11 @@
 import { useRef, useState, useEffect } from 'react';
 import { Search, ChevronDown, X } from 'lucide-react';
-import { cn } from '../../lib/utils';
+import { cn, MARKETS, sourceInCounty } from '../../lib/utils';
+import { useSources } from '../../hooks/useSources';
 
 export interface FilterState {
+  // county = the active MARKET (ILIKE on property_county). '' = all markets.
+  county: string;
   source_site: string;
   status: string;
   has_signals: boolean;
@@ -12,6 +15,7 @@ export interface FilterState {
 }
 
 export const defaultFilters: FilterState = {
+  county: '',
   source_site: '',
   // Default to active deals so the past/expired sheriff archive doesn't clutter
   // the buyable-listings view. Users can still pick Expired/Cancelled explicitly.
@@ -21,13 +25,6 @@ export const defaultFilters: FilterState = {
   sort: 'first_seen_at',
   order: 'desc',
 };
-
-const SOURCE_OPTIONS = [
-  'Cuyahoga Land Bank',
-  'Cuyahoga Sheriff Sale (DLN)',
-  'Cuyahoga Sheriff Sales',
-  'Cuyahoga Probate Court',
-];
 
 const STATUS_OPTIONS: { label: string; value: string }[] = [
   { label: 'Active', value: 'active' },
@@ -141,7 +138,28 @@ interface Props {
 }
 
 export function FilterBar({ filters, onChange, onClear }: Props) {
+  const { data: sourcesData } = useSources();
+
+  // Source dropdown is derived from /api/v1/sources (deal sources only), scoped to the
+  // selected market — so Shelby sources appear automatically once the backend reports
+  // them, no hardcoding. When no market is picked, all deal sources show.
+  const dealSources = (sourcesData?.sources ?? [])
+    .filter((s) => s.category === 'deal')
+    .map((s) => s.source_site);
+  const sourceOptions = (filters.county
+    ? dealSources.filter((s) => sourceInCounty(s, filters.county))
+    : dealSources
+  ).sort();
+
+  // Switching market clears a source that doesn't belong to the new market.
+  function handleMarketChange(county: string) {
+    const keepSource =
+      !filters.source_site || !county || sourceInCounty(filters.source_site, county);
+    onChange({ ...filters, county, source_site: keepSource ? filters.source_site : '' });
+  }
+
   const isFiltered =
+    !!filters.county ||
     !!filters.source_site ||
     !!filters.status ||
     filters.has_signals ||
@@ -161,11 +179,20 @@ export function FilterBar({ filters, onChange, onClear }: Props) {
         />
       </div>
 
-      {/* Source dropdown */}
+      {/* Market selector (Cuyahoga | Shelby–Memphis) */}
+      <SimpleSelect
+        label="Market"
+        value={filters.county}
+        options={MARKETS.map((m) => ({ label: m.label, value: m.county }))}
+        onChange={handleMarketChange}
+        placeholder="All markets"
+      />
+
+      {/* Source dropdown (dynamic, market-scoped) */}
       <SimpleSelect
         label="Source"
         value={filters.source_site}
-        options={SOURCE_OPTIONS.map((s) => ({ label: s, value: s }))}
+        options={sourceOptions.map((s) => ({ label: s, value: s }))}
         onChange={(v) => onChange({ ...filters, source_site: v })}
       />
 

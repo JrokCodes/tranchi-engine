@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { X, AlertTriangle, Flame, MapPin } from 'lucide-react';
+import { X, AlertTriangle, Flame, MapPin, ExternalLink } from 'lucide-react';
 import { useListing } from '../../hooks/useListings';
 import { StatusBadge } from '../shared/StatusBadge';
 import {
@@ -10,6 +10,7 @@ import {
   formatSignalType,
   sourceBadgeClass,
   sourceLabel,
+  buildVerifyLink,
 } from '../../lib/utils';
 import { cn } from '../../lib/utils';
 
@@ -199,6 +200,72 @@ function DrawerContent({ listingId, onClose }: { listingId: string; onClose: () 
         )}
       </div>
 
+      {/* Probate case (probate listings only) — decedent vs current owner is the verification value */}
+      {listing.decedent_name && (
+        <div>
+          <SectionLabel>Probate Case</SectionLabel>
+          <div className="bg-white rounded-xl border border-(--color-border) p-4 grid grid-cols-2 gap-x-6 gap-y-3">
+            <KvRow label="Decedent" value={listing.decedent_name} />
+            {listing.case_title && <KvRow label="Case Title" value={listing.case_title} />}
+            {listing.case_status && <KvRow label="Case Status" value={listing.case_status} />}
+            {listing.match_confidence && (
+              <KvRow
+                label="Match"
+                value={
+                  <span
+                    className={cn(
+                      'inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium capitalize',
+                      listing.match_confidence === 'confirmed'
+                        ? 'bg-(--color-success)/10 text-(--color-success)'
+                        : 'bg-(--color-gold-light) text-[#8B6914] border border-(--color-gold)/25'
+                    )}
+                  >
+                    {listing.match_confidence}
+                  </span>
+                }
+              />
+            )}
+          </div>
+          <p className="text-[11px] text-(--color-muted) mt-1.5">
+            Confirm the decedent matches the current registry owner below.
+          </p>
+        </div>
+      )}
+
+      {/* TN tax-deed redemption (tax_deed only; shows once a sale is confirmed — dormant pre-sale) */}
+      {listing.signal_type === 'tax_deed' &&
+        (listing.redemption_status || listing.redemption_ends) && (
+          <div>
+            <SectionLabel>Redemption (TN redeemable tax deed)</SectionLabel>
+            <div className="bg-white rounded-xl border border-(--color-border) p-4 grid grid-cols-2 gap-x-6 gap-y-3">
+              {listing.redemption_status && (
+                <KvRow
+                  label="Status"
+                  value={
+                    <span
+                      className={cn(
+                        'inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium capitalize',
+                        listing.redemption_status === 'pending'
+                          ? 'bg-(--color-gold-light) text-[#8B6914] border border-(--color-gold)/25'
+                          : 'bg-(--color-bg-elevated) text-(--color-slate)'
+                      )}
+                    >
+                      {listing.redemption_status === 'pending' ? 'Redeemable (speculative)' : listing.redemption_status}
+                    </span>
+                  }
+                />
+              )}
+              {listing.confirmation_order_date && (
+                <KvRow label="Sale Confirmed" value={formatDate(listing.confirmation_order_date)} />
+              )}
+              {listing.redemption_ends && (
+                <KvRow label="Redeemable Until" value={formatDate(listing.redemption_ends)} />
+              )}
+              <KvRow label="Statutory Interest" value="up to 12%" />
+            </div>
+          </div>
+        )}
+
       {/* Parcel section */}
       <div>
         <SectionLabel>Parcel</SectionLabel>
@@ -259,7 +326,7 @@ function DrawerContent({ listingId, onClose }: { listingId: string; onClose: () 
         <SectionLabel>Listing Details</SectionLabel>
         <div className="bg-white rounded-xl border border-(--color-border) p-4 grid grid-cols-2 gap-x-6 gap-y-3">
           <KvRow label="Source" value={sourceLabel(listing.source_site)} />
-          <KvRow label="Signal Type" value={formatSignalType(listing.signal_type)} />
+          {listing.signal_type && <KvRow label="Signal Type" value={formatSignalType(listing.signal_type)} />}
           {listing.case_number && <KvRow label="Case #" value={listing.case_number} />}
           {listing.trustee_name && <KvRow label="Trustee" value={listing.trustee_name} />}
           {listing.sale_date && <KvRow label="Sale Date" value={formatDate(listing.sale_date)} />}
@@ -273,6 +340,30 @@ function DrawerContent({ listingId, onClose }: { listingId: string; onClose: () 
           <KvRow label="Last Seen" value={formatRelative(listing.last_seen_at)} />
         </div>
       </div>
+
+      {/* Verify — external one-click confirmation on the authoritative county source */}
+      {(() => {
+        const link = buildVerifyLink(
+          listing.property_county,
+          parcel?.native_parcel_id ?? null,
+          listing.property_address,
+        );
+        if (!link) return null;
+        return (
+          <div>
+            <SectionLabel>Verify</SectionLabel>
+            <a
+              href={link.href}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-2 px-3 py-2 bg-(--color-navy)/5 text-(--color-navy) rounded-lg border border-(--color-navy)/15 hover:bg-(--color-navy)/10 transition-colors text-[13px] font-medium"
+            >
+              <ExternalLink size={14} />
+              {link.label}
+            </a>
+          </div>
+        );
+      })()}
 
       {/* Signals detail list */}
       {signals.length > 0 && (

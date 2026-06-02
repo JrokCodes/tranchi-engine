@@ -118,6 +118,7 @@ class ListingPage(BaseModel):
 
 class ParcelDetail(BaseModel):
     parcel_number: str
+    native_parcel_id: str | None
     owner_name: str | None
     situs_address: str | None
     owner_mailing_address: str | None
@@ -564,7 +565,7 @@ async def get_listing(
         p_row = await conn.fetchrow(
             """
             SELECT
-                parcel_number, owner_name, situs_address, owner_mailing_address,
+                parcel_number, native_parcel_id, owner_name, situs_address, owner_mailing_address,
                 current_market_value, taxable_value, current_tax_balance,
                 delinquent_flag, year_built, sq_ft, beds, baths,
                 last_sale_date, last_sale_price, source_url
@@ -576,6 +577,7 @@ async def get_listing(
         if p_row is not None:
             parcel = ParcelDetail(
                 parcel_number=p_row["parcel_number"],
+                native_parcel_id=p_row["native_parcel_id"],
                 owner_name=p_row["owner_name"],
                 situs_address=p_row["situs_address"],
                 owner_mailing_address=p_row["owner_mailing_address"],

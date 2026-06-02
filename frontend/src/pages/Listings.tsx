@@ -44,6 +44,7 @@ export default function Listings() {
   const [filters, setFilters] = useState<FilterState>(() => {
     return {
       ...defaultFilters,
+      county: searchParams.get('county') ?? '',
       source_site: searchParams.get('source_site') ?? '',
       status: searchParams.get('status') ?? 'active',
       has_signals: searchParams.get('has_signals') === 'true',
@@ -71,6 +72,7 @@ export default function Listings() {
     setFilters(newFilters);
     setPage(1);
     const next = new URLSearchParams();
+    if (newFilters.county) next.set('county', newFilters.county);
     if (newFilters.source_site) next.set('source_site', newFilters.source_site);
     if (newFilters.status) next.set('status', newFilters.status);
     if (newFilters.has_signals) next.set('has_signals', 'true');
@@ -102,6 +104,7 @@ export default function Listings() {
   }
 
   const apiFilters = {
+    county: filters.county || undefined,
     source_site: filters.source_site || undefined,
     status: filters.status || undefined,
     has_signals: filters.has_signals || undefined,
