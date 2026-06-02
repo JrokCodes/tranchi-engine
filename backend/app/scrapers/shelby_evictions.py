@@ -113,9 +113,11 @@ class ShelbyEvictionsScraper(SignalScraper):
             logger.error("ShelbyEvictions: CSV export failed: %s", exc)
             return []
 
+        # ODS CSV export is ';'-delimited and carries a UTF-8 BOM — strip the BOM or the
+        # first column name becomes '﻿property_address' and lookups silently return None.
+        text = text.lstrip("﻿")
         reader = csv.DictReader(io.StringIO(text), delimiter=";")
-        # ODS CSV is ';'-delimited by default; fall back to ',' if a single column came back.
-        if reader.fieldnames and len(reader.fieldnames) == 1:
+        if reader.fieldnames and len(reader.fieldnames) == 1:  # fresh StringIO; ',' fallback
             reader = csv.DictReader(io.StringIO(text), delimiter=",")
 
         rows_seen = skipped_complex = skipped_nostreet = 0
