@@ -68,6 +68,7 @@ from app.scrapers.fiscal_officer import (  # noqa: E402
 from app.scrapers.shelby_parcels import ShelbyParcelsScraper  # noqa: E402
 from app.scrapers.shelby_tax_sale import ShelbyTaxSaleScraper  # noqa: E402
 from app.scrapers.shelby_foreclosure import ShelbyForeclosureScraper  # noqa: E402
+from app.scrapers.shelby_delinquent_tax import ShelbyDelinquentTaxScraper  # noqa: E402
 from app.scrapers.shelby_county_landbank import ShelbyCountyLandBankScraper  # noqa: E402
 from app.scrapers.shelby_mmlba import MemphisMMLBAScraper  # noqa: E402
 from app.scrapers.landbank import LandBankScraper  # noqa: E402
@@ -95,6 +96,7 @@ _SCRAPERS: dict[str, type] = {
     "shelby_parcels": ShelbyParcelsScraper,   # Shelby County (TN) registry spine (ArcGIS)
     "shelby_tax_sale": ShelbyTaxSaleScraper,           # Shelby (TN) tax-deed pre-sale catalog (CSV)
     "shelby_foreclosure": ShelbyForeclosureScraper,    # Shelby (TN) mortgage/trustee-sale foreclosure (tnforeclosurenotices + auction.com)
+    "shelby_delinquent_tax": ShelbyDelinquentTaxScraper,  # Shelby (TN) tax-delinquent SIGNAL (Trustee lawsuit XLSX)
     "shelby_county_landbank": ShelbyCountyLandBankScraper,  # Shelby (TN) County land bank (ePropertyPlus)
     "shelby_mmlba": MemphisMMLBAScraper,               # Memphis (TN) City land bank MMLBA (Airtable)
 }

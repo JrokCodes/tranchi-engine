@@ -21,3 +21,5 @@ lxml==5.3.0
 playwright>=1.43.0
 # msgpack required by shelby_mmlba.py to decode Airtable's binary XHR responses.
 msgpack>=1.0.8
+# openpyxl required by shelby_delinquent_tax.py to parse the Trustee's XLSX lawsuit list.
+openpyxl>=3.1.0
