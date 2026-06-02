@@ -160,6 +160,11 @@ _DIM_MAP: dict[str, str] = {
     "cert_sold": "Tax Distress",
     "tax_payment_plan": "Tax Distress",
     "tax_delinquent": "Tax Distress",
+    # tax_deed (tax-sale listing) collapses into Tax Distress so a tax-sale row that
+    # ALSO carries a tax_delinquent signal isn't double-counted as HOT — a tax-sale
+    # property is delinquent by definition. Foreclosure/land-bank/probate + tax_delinquent
+    # remain correctly HOT (distinct dimensions). (2026-06-02)
+    "tax_deed": "Tax Distress",
 }
 
 
