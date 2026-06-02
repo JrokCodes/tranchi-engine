@@ -79,6 +79,15 @@ class ListingItem(BaseModel):
     decedent_name: str | None
     case_title: str | None
     decedent_dod: date | None
+    # TN tax-deed redemption lifecycle (migration 011; null for non-tax_deed). TN is a
+    # redeemable tax-deed state: a sold parcel is SPECULATIVE (clawback risk) until
+    # redemption_ends. redemption_status: NULL|pending|redeemed|final. The UI badges a
+    # 'pending' row "redeemable until {redemption_ends}". Statutory interest is "up to 12%".
+    confirmation_order_date: date | None
+    redemption_ends: date | None
+    redemption_status: str | None
+    redemption_window_days: int | None
+    redemption_basis: str | None
     # 'no_street_number' = real registry-confirmed parcel (usu. vacant land) the county
     # lists without a house number; verify by parcel #, not street address. NULL = normal.
     address_status: str | None
@@ -241,6 +250,11 @@ def _row_to_item(r: asyncpg.Record) -> ListingItem:
         decedent_name=r["decedent_name"],
         case_title=r["case_title"],
         decedent_dod=r["decedent_dod"],
+        confirmation_order_date=r["confirmation_order_date"],
+        redemption_ends=r["redemption_ends"],
+        redemption_status=r["redemption_status"],
+        redemption_window_days=r["redemption_window_days"],
+        redemption_basis=r["redemption_basis"],
         address_status=r["address_status"],
         first_seen_at=r["first_seen_at"],
         last_seen_at=r["last_seen_at"],
@@ -295,6 +309,11 @@ _BASE_SELECT = """
         l.decedent_name,
         l.case_title,
         l.decedent_dod,
+        l.confirmation_order_date,
+        l.redemption_ends,
+        l.redemption_status,
+        l.redemption_window_days,
+        l.redemption_basis,
         l.address_status,
         l.first_seen_at,
         l.last_seen_at,
@@ -328,6 +347,7 @@ def _build_where(
     county: str | None,
     city: str | None,
     signal_type: str | None,
+    redemption_status: str | None,
     has_signals: bool | None,
     min_signals: int | None,
     q: str | None,
@@ -357,6 +377,11 @@ def _build_where(
     if city:
         conditions.append(f"l.property_city ILIKE ${idx}")
         params.append(city)
+        idx += 1
+
+    if redemption_status:
+        conditions.append(f"l.redemption_status = ${idx}")
+        params.append(redemption_status)
         idx += 1
 
     if q:
@@ -433,6 +458,7 @@ async def list_listings(
     county: str | None = Query(default=None),
     city: str | None = Query(default=None),
     signal_type: str | None = Query(default=None),
+    redemption_status: str | None = Query(default=None, description="TN tax-deed lifecycle: pending|redeemed|final"),
     has_signals: bool | None = Query(default=None),
     min_signals: int | None = Query(default=None, ge=0),
     q: str | None = Query(default=None, description="Address ILIKE search"),
@@ -463,6 +489,7 @@ async def list_listings(
         county=county,
         city=city,
         signal_type=signal_type,
+        redemption_status=redemption_status,
         has_signals=has_signals,
         min_signals=min_signals,
         q=q,

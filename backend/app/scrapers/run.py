@@ -439,6 +439,12 @@ async def _mark_stale_listings(
                 WHERE status NOT IN ('not_listed', 'cancelled', 'sold', 'expired')
                   AND last_seen_at < $1
                   AND source_site = ANY($2::text[])
+                  -- TN redemption: a tax-deed parcel legitimately LEAVES the pre-sale
+                  -- catalog once it sells, so absence != delisted. Never time-retire a
+                  -- post-sale or mid-redemption tax_deed row — its lifecycle is owned by
+                  -- the redemption post-passes + Chancery confirmation reader, not staleness.
+                  AND NOT (signal_type = 'tax_deed'
+                           AND (redemption_status = 'pending' OR sale_date < CURRENT_DATE))
                 """,
                 run_start,
                 successful_sources,
@@ -558,6 +564,13 @@ async def _mark_expired_listings(pool: asyncpg.Pool) -> int:
                 SET status = 'expired'
                 WHERE sale_date < CURRENT_DATE
                   AND status IN ('active', 'not_listed')
+                  -- TN redemption: do NOT expire a tax-deed row just because its sale
+                  -- date passed. Post-sale it enters the redemption lifecycle (awaiting
+                  -- confirmation -> pending -> final/redeemed), owned by the redemption
+                  -- post-passes. Expiring it here would drop the speculative lead.
+                  AND NOT (signal_type = 'tax_deed'
+                           AND (confirmation_order_date IS NULL
+                                OR redemption_status = 'pending'))
                 """,
             )
             count = int(result.split()[-1]) if result else 0
@@ -671,6 +684,103 @@ async def _flag_incomplete_addresses(pool: asyncpg.Pool) -> int:
         return 0
 
 
+async def _compute_redemption_windows(pool: asyncpg.Pool) -> int:
+    """Resolve the TN tax-deed redemption window for confirmed-sale rows.
+
+    Runs only on tax_deed listings that have a Chancery `confirmation_order_date`
+    (set by shelby_tax_confirmation.py). The window length is driven by delinquency
+    age (TCA 67-5-2701): <=5yr -> 365d, 5-7yr -> 180d, 8yr+ -> 90d. When delinquency
+    age is unknown (parcels.tax_years_delinquent NULL) we DEFAULT TO THE LONGEST
+    window (365d) — the conservative, money-safe direction: a parcel stays flagged
+    speculative LONGER, so we never tell Marc a deal is final/safe when it might still
+    be clawed back.
+
+    Vacant (30d) and IRS-lien (120d) tiers are NOT triggered: there is no authoritative
+    vacancy / IRS-lien flag in the schema, and those are the SHORTEST windows — firing
+    them on a guess would mark a still-redeemable deal final too early (the dangerous
+    direction). They fall through to the delinquency tier / 365d default until a real
+    source exists. redemption_ends = confirmation_order_date + window.
+
+    Idempotent: recomputes 'pending'/newly-confirmed rows, leaves 'redeemed'/'final'
+    alone. Does NOT change listings.status (stays 'active' = visible while pending);
+    _finalize_expired_redemptions flips elapsed windows to 'final'.
+    """
+    try:
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                UPDATE tranchi.listings AS l
+                SET redemption_window_days = w.window_days,
+                    redemption_basis       = w.basis,
+                    redemption_ends        = l.confirmation_order_date
+                                             + (w.window_days || ' days')::interval,
+                    redemption_status      = 'pending',
+                    redemption_checked_at  = now()
+                FROM (
+                    SELECT l2.id,
+                           CASE
+                               WHEN p.tax_years_delinquent >= 8 THEN 90
+                               WHEN p.tax_years_delinquent >= 5 THEN 180
+                               WHEN p.tax_years_delinquent IS NOT NULL THEN 365
+                               ELSE 365
+                           END AS window_days,
+                           CASE
+                               WHEN p.tax_years_delinquent >= 8 THEN '8yr_plus'
+                               WHEN p.tax_years_delinquent >= 5 THEN '5_to_7yr'
+                               WHEN p.tax_years_delinquent IS NOT NULL THEN 'le_5yr'
+                               ELSE 'default_assumed'
+                           END AS basis
+                    FROM tranchi.listings l2
+                    LEFT JOIN tranchi.parcels p
+                           ON p.parcel_number = l2.source_listing_id
+                    WHERE l2.signal_type = 'tax_deed'
+                      AND l2.confirmation_order_date IS NOT NULL
+                      AND (l2.redemption_status IS NULL
+                           OR l2.redemption_status = 'pending')
+                ) AS w
+                WHERE l.id = w.id
+                """
+            )
+            count = int(result.split()[-1]) if result else 0
+            if count > 0:
+                logger.info("Redemption windows: computed/refreshed %d tax-deed rows", count)
+            return count
+    except Exception as exc:
+        logger.warning("Redemption-window computation failed: %s", exc)
+        return 0
+
+
+async def _finalize_expired_redemptions(pool: asyncpg.Pool) -> int:
+    """Close out tax-deed rows whose redemption window has elapsed unredeemed.
+
+    A 'pending' row past its redemption_ends with no redemption recorded means the
+    statutory window closed and the buyer's deed is now final/clean — no longer a
+    distress deal. Flip status -> 'final' (hidden from the active feed) and
+    redemption_status -> 'final'. Redeemed parcels never reach here (they are set
+    status='transferred'/redemption_status='redeemed' by the confirmation reader, and
+    also caught by _mark_transferred_listings via parcels.last_sale_date).
+    """
+    try:
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                UPDATE tranchi.listings
+                SET status            = 'final',
+                    redemption_status = 'final'
+                WHERE signal_type = 'tax_deed'
+                  AND redemption_status = 'pending'
+                  AND redemption_ends < CURRENT_DATE
+                """
+            )
+            count = int(result.split()[-1]) if result else 0
+            if count > 0:
+                logger.info("Redemption finalize: %d tax-deed windows elapsed -> final", count)
+            return count
+    except Exception as exc:
+        logger.warning("Redemption finalize failed: %s", exc)
+        return 0
+
+
 async def main() -> int:
     parser = argparse.ArgumentParser(
         description="Tranchi Engine — run deal-sourcing scrapers",
@@ -746,10 +856,13 @@ async def main() -> int:
             stubs = await _ensure_parcels_for_listings(pool)
             no_num = await _flag_incomplete_addresses(pool)
             transferred = await _mark_transferred_listings(pool)
+            redeem_win = await _compute_redemption_windows(pool)
+            finalized = await _finalize_expired_redemptions(pool)
             dupes = await _dedup_cross_source_listings(pool)
             logger.info(
-                "Post-run: %d delisted, %d expired, %d parcel-stubs, %d no-number, %d transferred, %d dupes",
-                delisted, expired, stubs, no_num, transferred, dupes,
+                "Post-run: %d delisted, %d expired, %d parcel-stubs, %d no-number, "
+                "%d transferred, %d redemption-windows, %d finalized, %d dupes",
+                delisted, expired, stubs, no_num, transferred, redeem_win, finalized, dupes,
             )
 
         total_errors = sum(r.errors for r in results)
