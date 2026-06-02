@@ -67,6 +67,7 @@ from app.scrapers.fiscal_officer import (  # noqa: E402
 )
 from app.scrapers.shelby_parcels import ShelbyParcelsScraper  # noqa: E402
 from app.scrapers.shelby_tax_sale import ShelbyTaxSaleScraper  # noqa: E402
+from app.scrapers.shelby_foreclosure import ShelbyForeclosureScraper  # noqa: E402
 from app.scrapers.shelby_county_landbank import ShelbyCountyLandBankScraper  # noqa: E402
 from app.scrapers.shelby_mmlba import MemphisMMLBAScraper  # noqa: E402
 from app.scrapers.landbank import LandBankScraper  # noqa: E402
@@ -93,6 +94,7 @@ _SCRAPERS: dict[str, type] = {
     "delinquent_tax": DelinquentTaxScraper,   # tax-distress SIGNAL (ArcGIS)
     "shelby_parcels": ShelbyParcelsScraper,   # Shelby County (TN) registry spine (ArcGIS)
     "shelby_tax_sale": ShelbyTaxSaleScraper,           # Shelby (TN) tax-deed pre-sale catalog (CSV)
+    "shelby_foreclosure": ShelbyForeclosureScraper,    # Shelby (TN) mortgage/trustee-sale foreclosure (tnforeclosurenotices + auction.com)
     "shelby_county_landbank": ShelbyCountyLandBankScraper,  # Shelby (TN) County land bank (ePropertyPlus)
     "shelby_mmlba": MemphisMMLBAScraper,               # Memphis (TN) City land bank MMLBA (Airtable)
 }
@@ -182,6 +184,10 @@ async def _run_scraper(
         # DLN resolves tax-sale addresses against tranchi.parcels + on-demand
         # MyPlace lookups (cached back), so it needs the pool + dry_run flag.
         # Still a plain ListingScraper — output flows through the listing path.
+        scraper = scraper_cls(pool=pool, dry_run=dry_run)
+    elif scraper_key == "shelby_foreclosure":
+        # Resolves source street addresses to Shelby parcels against tranchi.parcels
+        # (house# + zip + street), so it needs the pool. Plain ListingScraper.
         scraper = scraper_cls(pool=pool, dry_run=dry_run)
     else:
         scraper = scraper_cls()
