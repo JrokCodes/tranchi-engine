@@ -67,7 +67,7 @@ except Exception:  # pragma: no cover
 
 from app.scrapers.base import ListingScraper
 from app.scrapers.db import canonical_address, normalize_parcel_number
-from app.scrapers.fiscal_officer import _name_confidence, _normalize_name
+from app.scrapers.fiscal_officer import _name_confidence, _normalize_name, _levenshtein, _STRONG_TOKEN
 from app.scrapers.models import RawListing
 from app.scrapers.shelby_foreclosure import _resolve_parcels
 
@@ -262,23 +262,32 @@ def _name_tokens(name: str) -> list[str]:
     return [t for t in _normalize_name(name).split() if len(t) >= 2 and t not in _SUFFIXES]
 
 
+def _sim(a: str, b: str) -> float:
+    """Per-token similarity 0..1 (1 - normalized Levenshtein)."""
+    if not a or not b:
+        return 0.0
+    return 1.0 - _levenshtein(a, b) / max(len(a), len(b), 1)
+
+
 async def _resolve_by_owner_name(
     pool: Any, decedent_name: str
 ) -> dict[str, dict[str, Any]]:
-    """Return {parcel_number: {owner_name, situs, score}} for owner_name matches.
+    """Return {parcel_number: {owner_name, situs, score}} for precision-safe owner matches.
 
-    Candidate fetch requires BOTH a surname AND a given-name substring (mirrors the
-    >=2-strong-token rule and keeps a common surname from pulling thousands of rows),
-    then fiscal_officer._name_confidence does the fuzzy >=2-strong scoring. Only
-    matches at/above _MIN_CONFIDENCE are kept.
+    SURNAME-ANCHORED (critical — see file header). The spine stores owners SURNAME-FIRST
+    ('JAMISON ROOSEVELT', 'KEATHLEY RANDY L & LINDA C'), so a real match requires the
+    decedent's SURNAME to strong-match the owner's LEADING token AND the decedent's GIVEN
+    name to strong-match SOME owner token. Without the surname anchor, the bare
+    >=2-strong-token rule false-matches across MULTI-OWNER strings — e.g. decedent
+    'ASHLEY S. DANIEL' wrongly hit 'HARPER DANIEL S & ASHLEY B' (Daniel/Ashley are two
+    OTHER people). The anchor kills that while still catching co-owner decedents (the
+    shared leading surname covers 'KEATHLEY RANDY & LINDA').
     """
     out: dict[str, dict[str, Any]] = {}
     toks = _name_tokens(decedent_name)
     if pool is None or len(toks) < 2:
         return out  # cannot precision-match on a single token — emit nothing
 
-    # surname = last token, given = first token (owner_name is 'SURNAME GIVEN ...',
-    # _name_confidence is token-order-independent so the substrings just have to exist)
     surname, given = toks[-1], toks[0]
     try:
         async with pool.acquire() as conn:
@@ -298,6 +307,15 @@ async def _resolve_by_owner_name(
         return out
 
     for r in rows:
+        owner_toks = _normalize_name(r["owner_name"]).split()
+        if not owner_toks:
+            continue
+        # Surname must be the LEADING token (the shared surname in this dataset).
+        if _sim(surname, owner_toks[0]) < _STRONG_TOKEN:
+            continue
+        # Given name must strong-match some token (covers primary + co-owner givens).
+        if max((_sim(given, t) for t in owner_toks), default=0.0) < _STRONG_TOKEN:
+            continue
         score = _name_confidence(decedent_name, r["owner_name"])
         if score < _MIN_CONFIDENCE:
             continue
@@ -361,18 +379,6 @@ async def _upsert_signal(pool: Any, parcel: str, case_id: str, decedent: str, sc
 # ─────────────────────────────────────────────────────────────────────────────
 # Classify + build
 # ─────────────────────────────────────────────────────────────────────────────
-
-def _classify(name_hit: dict | None, addr_hit: dict | None) -> tuple[str, str, float]:
-    """(method, tier, score). Address-anchored is the most authoritative."""
-    if name_hit and addr_hit:
-        return "composite", "confirmed", 0.98
-    if addr_hit:
-        return "address_anchor", "confirmed", 0.95
-    if name_hit is None:  # caller guarantees the union is non-empty; guard anyway
-        raise ValueError("_classify called with both hits None")
-    score = name_hit["score"]  # name-only
-    return "name_match", ("probable" if score >= _HIGH_CONFIDENCE else "unverified"), score
-
 
 def _build_listing(
     *, parcel: str, situs: str | None, case_id: str, case_status: str | None,
@@ -542,18 +548,29 @@ class ShelbyProbateScraper(ListingScraper):
                         current += 1
                         continue
 
+                    # Precision-first tiering. Address-anchored parcels are ALWAYS shown
+                    # (confirmed). A name-only parcel is 'probable' (shown) ONLY when it is
+                    # the UNIQUE name match for this decedent AND scores high — multiple
+                    # name matches mean either a multi-property owner OR (the real risk)
+                    # several different people with the same name, indistinguishable
+                    # without an anchor, so they are skipped (hidden) rather than shown.
                     name_ambiguous = len(name_hits) > _AMBIGUITY_CAP
+                    name_unique = len(name_hits) == 1
                     for parcel in set(name_hits) | set(addr_hits):
                         nh = name_hits.get(parcel)
                         ah = addr_hits.get(parcel)
-                        method, tier, score = _classify(nh, ah)
-                        if ah is None:  # name-only path — apply precision gates
+                        if ah is not None:
+                            method = "composite" if nh else "address_anchor"
+                            tier, score = "confirmed", (0.98 if nh else 0.95)
+                        else:  # name-only — precision gates
                             if name_ambiguous:
                                 skipped_ambiguous += 1
                                 continue
-                            if tier == "unverified":
-                                skipped_weak += 1
+                            score = nh["score"]
+                            if not (name_unique and score >= _HIGH_CONFIDENCE):
+                                skipped_weak += 1  # ambiguous-few / low-score → hidden
                                 continue
+                            method, tier = "name_match", "probable"
                         situs = (ah or nh).get("situs")
                         listings.append(_build_listing(
                             parcel=parcel, situs=situs, case_id=case_id, case_status=case_status,
