@@ -52,6 +52,10 @@ SOURCE_STALENESS: dict[str, StalenessPolicy] = {
     "Shelby County Foreclosure": StalenessPolicy.FULL_RESCAN,
     "Shelby County Land Bank": StalenessPolicy.FULL_RESCAN,
     "Memphis MMLBA": StalenessPolicy.FULL_RESCAN,
+    # Probate is a CURSOR walk (PR-number forward-only), like Cuyahoga's — it can NEVER
+    # be retired by time-not-seen (that wrongly retires the whole back-catalog). It
+    # retires only when shelby_probate_recheck.py finds the case CLOSED/DISPOSED.
+    "Shelby Probate Court": StalenessPolicy.CURSOR,
 }
 
 DEFAULT_POLICY = StalenessPolicy.FULL_RESCAN

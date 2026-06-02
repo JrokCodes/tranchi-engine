@@ -71,6 +71,8 @@ from app.scrapers.shelby_foreclosure import ShelbyForeclosureScraper  # noqa: E4
 from app.scrapers.shelby_delinquent_tax import ShelbyDelinquentTaxScraper  # noqa: E402
 from app.scrapers.shelby_county_landbank import ShelbyCountyLandBankScraper  # noqa: E402
 from app.scrapers.shelby_mmlba import MemphisMMLBAScraper  # noqa: E402
+from app.scrapers.shelby_probate import ShelbyProbateScraper  # noqa: E402
+from app.scrapers.shelby_evictions import ShelbyEvictionsScraper  # noqa: E402
 from app.scrapers.landbank import LandBankScraper  # noqa: E402
 from app.scrapers.models import ScrapeResult  # noqa: E402
 from app.scrapers.prefilter import prefilter  # noqa: E402
@@ -99,6 +101,8 @@ _SCRAPERS: dict[str, type] = {
     "shelby_delinquent_tax": ShelbyDelinquentTaxScraper,  # Shelby (TN) tax-delinquent SIGNAL (Trustee lawsuit XLSX)
     "shelby_county_landbank": ShelbyCountyLandBankScraper,  # Shelby (TN) County land bank (ePropertyPlus)
     "shelby_mmlba": MemphisMMLBAScraper,               # Memphis (TN) City land bank MMLBA (Airtable)
+    "shelby_probate": ShelbyProbateScraper,            # Shelby (TN) probate estate cases (CourtConnect, precision-first)
+    "shelby_evictions": ShelbyEvictionsScraper,        # Shelby (TN) eviction filings SIGNAL (Data Midsouth)
 }
 
 
@@ -190,6 +194,15 @@ async def _run_scraper(
     elif scraper_key == "shelby_foreclosure":
         # Resolves source street addresses to Shelby parcels against tranchi.parcels
         # (house# + zip + street), so it needs the pool. Plain ListingScraper.
+        scraper = scraper_cls(pool=pool, dry_run=dry_run)
+    elif scraper_key == "shelby_probate":
+        # Manages its own cursor (tranchi.shelby_probate_cursor), cross-refs the spine
+        # for the name/address join, and writes probate signals — needs pool + dry_run.
+        # Drives CourtConnect via Playwright (Cloudflare gate). Plain ListingScraper out.
+        scraper = scraper_cls(pool=pool, dry_run=dry_run)
+    elif scraper_key == "shelby_evictions":
+        # SignalScraper, but resolves property addresses to spine parcels (no parcel in
+        # source), so it needs the pool. Output flows through the signal path below.
         scraper = scraper_cls(pool=pool, dry_run=dry_run)
     else:
         scraper = scraper_cls()
