@@ -73,6 +73,12 @@ class ListingItem(BaseModel):
     match_method: str | None
     match_confidence: str | None
     match_score: float | None
+    # Decedent identity denormalized onto probate listings (migration 007). Surfaced so a
+    # probate card can show decedent vs current owner_name for human verification (null for
+    # non-probate). DOD is null for Shelby (the public court view doesn't expose it).
+    decedent_name: str | None
+    case_title: str | None
+    decedent_dod: date | None
     # 'no_street_number' = real registry-confirmed parcel (usu. vacant land) the county
     # lists without a house number; verify by parcel #, not street address. NULL = normal.
     address_status: str | None
@@ -232,6 +238,9 @@ def _row_to_item(r: asyncpg.Record) -> ListingItem:
         match_method=r["match_method"],
         match_confidence=r["match_confidence"],
         match_score=_to_float(r["match_score"]),
+        decedent_name=r["decedent_name"],
+        case_title=r["case_title"],
+        decedent_dod=r["decedent_dod"],
         address_status=r["address_status"],
         first_seen_at=r["first_seen_at"],
         last_seen_at=r["last_seen_at"],
@@ -283,6 +292,9 @@ _BASE_SELECT = """
         l.match_method,
         l.match_confidence,
         l.match_score,
+        l.decedent_name,
+        l.case_title,
+        l.decedent_dod,
         l.address_status,
         l.first_seen_at,
         l.last_seen_at,
