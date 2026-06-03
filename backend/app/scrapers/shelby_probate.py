@@ -298,6 +298,12 @@ async def _resolve_by_owner_name(
                 WHERE owner_name ILIKE '%' || $1 || '%'
                   AND owner_name ILIKE '%' || $2 || '%'
                   AND owner_name IS NOT NULL AND owner_name <> ''
+                  -- MARKET SCOPE (load-bearing): parcels is a SHARED multi-market table with
+                  -- no state column; markets are distinguished ONLY by parcel_number format
+                  -- (TN = 14-char alnum; OH = DDD-NN-NNN). Without this guard a Shelby decedent
+                  -- name fuzzy-matches a CUYAHOGA owner -> a TN listing gets an OH parcel and
+                  -- cross-county dedup wrongly merges it. Scope the candidate fetch to TN parcels.
+                  AND parcel_number ~ '^[0-9A-Z]{14}$'
                 LIMIT 200
                 """,
                 surname, given,
