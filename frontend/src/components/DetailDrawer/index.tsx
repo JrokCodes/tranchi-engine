@@ -10,7 +10,6 @@ import {
   formatSignalType,
   sourceBadgeClass,
   sourceLabel,
-  buildVerifyLink,
 } from '../../lib/utils';
 import { cn } from '../../lib/utils';
 
@@ -35,6 +34,26 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
     <p className="text-[10px] uppercase tracking-[0.14em] text-(--color-muted) font-semibold mb-2.5">
       {children}
     </p>
+  );
+}
+
+// One-click verification button (opens the external source in a new tab).
+function VerifyBtn({ href, label, tone }: { href: string; label: string; tone: 'navy' | 'slate' }) {
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      className={cn(
+        'inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border transition-colors text-[13px] font-medium',
+        tone === 'navy'
+          ? 'bg-(--color-navy)/5 text-(--color-navy) border-(--color-navy)/15 hover:bg-(--color-navy)/10'
+          : 'bg-white text-(--color-slate) border-(--color-border) hover:border-(--color-navy)/25 hover:text-(--color-ink)'
+      )}
+    >
+      <ExternalLink size={13} />
+      {label}
+    </a>
   );
 }
 
@@ -341,29 +360,36 @@ function DrawerContent({ listingId, onClose }: { listingId: string; onClose: () 
         </div>
       </div>
 
-      {/* Verify — external one-click confirmation on the authoritative county source */}
-      {(() => {
-        const link = buildVerifyLink(
-          listing.property_county,
-          parcel?.native_parcel_id ?? null,
-          listing.property_address,
-        );
-        if (!link) return null;
-        return (
-          <div>
-            <SectionLabel>Verify</SectionLabel>
-            <a
-              href={link.href}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-2 px-3 py-2 bg-(--color-navy)/5 text-(--color-navy) rounded-lg border border-(--color-navy)/15 hover:bg-(--color-navy)/10 transition-colors text-[13px] font-medium"
-            >
-              <ExternalLink size={14} />
-              {link.label}
-            </a>
+      {/* Verify — one-click confirmation buttons (Zillow/Redfin off-market, county
+          registry, original source). Links are built server-side in verify_links.py. */}
+      {listing.verify_links && (
+        <div>
+          <SectionLabel>Verify</SectionLabel>
+          <div className="flex flex-wrap gap-2">
+            {listing.verify_links.zillow && (
+              <VerifyBtn href={listing.verify_links.zillow} label="Zillow" tone="navy" />
+            )}
+            {listing.verify_links.redfin && (
+              <VerifyBtn href={listing.verify_links.redfin} label="Redfin" tone="navy" />
+            )}
+            {listing.verify_links.registry && (
+              <VerifyBtn
+                href={listing.verify_links.registry}
+                label={listing.verify_links.registry_label || 'County Registry'}
+                tone="slate"
+              />
+            )}
+            {listing.verify_links.source && (
+              <VerifyBtn href={listing.verify_links.source} label="Source" tone="slate" />
+            )}
           </div>
-        );
-      })()}
+          <p className="text-[11px] text-(--color-muted) mt-2 leading-snug">
+            <strong>Zillow / Redfin</strong>: confirm the property is <em>off-market</em> (not
+            actively for sale = distress intact). <strong>Registry</strong>: owner + tax + sale
+            notice. <strong>Source</strong>: the original record.
+          </p>
+        </div>
+      )}
 
       {/* Signals detail list */}
       {signals.length > 0 && (

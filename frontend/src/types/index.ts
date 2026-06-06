@@ -78,6 +78,16 @@ export interface ApiListingItem {
   delinquent_flag: boolean;
   // Google Street View image URL (null when no Maps key / no coverage).
   street_view_url: string | null;
+  // One-click verification deep-links (built server-side in verify_links.py).
+  verify_links: VerifyLinks | null;
+}
+
+export interface VerifyLinks {
+  zillow: string | null;
+  redfin: string | null;
+  registry: string | null;
+  registry_label: string | null;
+  source: string | null;
 }
 
 export interface ListingsResponse {

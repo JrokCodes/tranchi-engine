@@ -28,6 +28,8 @@ from slowapi.util import get_remote_address
 
 from app.database import get_db
 from app.services.streetview import build_street_view_url
+from app.verify_links import build_verify_links
+from app.routers.sources import _SOURCE_META
 
 router = APIRouter()
 limiter = Limiter(key_func=get_remote_address)
@@ -110,6 +112,9 @@ class ListingItem(BaseModel):
     # Google Street View Static API URL, built on the fly from the address.
     # None when GOOGLE_MAPS_API_KEY is unset → frontend shows a placeholder.
     street_view_url: str | None = None
+    # One-click verification deep-links (zillow/redfin/registry/source). Built
+    # deterministically from address+parcel+market in app/verify_links.py.
+    verify_links: dict | None = None
 
 
 class ListingPage(BaseModel):
@@ -279,6 +284,15 @@ def _row_to_item(r: asyncpg.Record) -> ListingItem:
             state=r["property_state"],
             zip_code=r["property_zip"],
         ),
+        verify_links=build_verify_links(
+            address=r["property_address"],
+            city=r["property_city"],
+            state=r["property_state"],
+            zip_=r["property_zip"],
+            native_parcel_id=r["native_parcel_id"],
+            canonical_parcel=r["source_listing_id"],
+            source_url=(_SOURCE_META.get(r["source_site"]) or (None, None))[0],
+        ),
     )
 
 
@@ -330,7 +344,8 @@ _BASE_SELECT = """
         p.situs_address,
         p.current_market_value,
         p.current_tax_balance,
-        p.delinquent_flag
+        p.delinquent_flag,
+        p.native_parcel_id
     FROM tranchi.listings l
     LEFT JOIN (
         SELECT parcel_number,
