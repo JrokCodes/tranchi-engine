@@ -71,12 +71,14 @@ async def surface_distress_leads(pool: asyncpg.Pool, *, dry_run: bool = False) -
                 "SELECT count(*) FROM tranchi.listings WHERE source_site=$1 AND status='active'",
                 ss,
             )
-            if n and not dry_run:
-                await conn.execute(
-                    "UPDATE tranchi.listings SET status='not_listed' "
-                    "WHERE source_site=$1 AND status='active'",
-                    ss,
-                )
+            if not dry_run:
+                if n:
+                    await conn.execute(
+                        "UPDATE tranchi.listings SET status='not_listed' "
+                        "WHERE source_site=$1 AND status='active'",
+                        ss,
+                    )
+                await _record_run(conn, ss, found=0, active=0, new_today=0)
             stats[r["signal_type"]] = {"enabled": False, "retired_disabled": int(n or 0)}
             if n:
                 logger.info("[%s] disabled — retired %d active leads%s", ss, n,
@@ -163,13 +165,28 @@ async def surface_distress_leads(pool: asyncpg.Pool, *, dry_run: bool = False) -
             retired = _affected(await conn.execute(retire_sql, ss, src, st))
             inserted = _affected(await conn.execute(insert_sql, ss, src, st))
             await conn.execute(refresh_sql, ss, src, st)
-            active = await conn.fetchval(
-                "SELECT count(*) FROM tranchi.listings WHERE source_site=$1 AND status='active'", ss)
+            active = int(await conn.fetchval(
+                "SELECT count(*) FROM tranchi.listings WHERE source_site=$1 AND status='active'", ss) or 0)
+            await _record_run(conn, ss, found=active, active=active, new_today=inserted)
             stats[st] = {"enabled": True, "inserted": inserted, "retired": retired,
-                         "active_total": int(active or 0)}
+                         "active_total": active}
             logger.info("[%s] inserted %d, retired %d, active now %d", ss, inserted, retired, active)
 
     return stats
+
+
+async def _record_run(conn: asyncpg.Connection, source_site: str, *,
+                       found: int, active: int, new_today: int) -> None:
+    """Write a completed scrape_runs row so the lead source is first-class on the Sources
+    page (counts + 'online' freshness) and populates the Pre-Distress source dropdown."""
+    await conn.execute(
+        """
+        INSERT INTO tranchi.scrape_runs
+            (source_site, started_at, completed_at, status, found, passed, active, new_today)
+        VALUES ($1, now(), now(), 'success', $2, $2, $3, $4)
+        """,
+        source_site, found, active, new_today,
+    )
 
 
 def _affected(tag: str | None) -> int:
