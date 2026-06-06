@@ -67,6 +67,10 @@ class ListingItem(BaseModel):
     trustee_name: str | None
     case_number: str | None
     source_listing_id: str | None
+    # buy_now = actively-acquirable deal (default feed); distress_signal = pre-distress LEAD
+    # materialized from a signal (tax_delinquent lawsuit / eviction). UI "Buy Now" vs
+    # "Pre-Distress" toggle keys on this (migration 012).
+    distress_stage: str | None
     # Probate validity + parcel→decedent join quality (null for non-probate).
     case_status: str | None
     case_status_date: date | None
@@ -243,6 +247,7 @@ def _row_to_item(r: asyncpg.Record) -> ListingItem:
         trustee_name=r["trustee_name"],
         case_number=r["case_number"],
         source_listing_id=r["source_listing_id"],
+        distress_stage=r["distress_stage"],
         case_status=r["case_status"],
         case_status_date=r["case_status_date"],
         match_method=r["match_method"],
@@ -302,6 +307,7 @@ _BASE_SELECT = """
         l.trustee_name,
         l.case_number,
         l.source_listing_id,
+        l.distress_stage,
         l.case_status,
         l.case_status_date,
         l.match_method,
@@ -352,6 +358,7 @@ def _build_where(
     has_signals: bool | None,
     min_signals: int | None,
     q: str | None,
+    distress_stage: str | None = "buy_now",
     include_duplicates: bool = False,
     include_unverified: bool = False,
 ) -> tuple[list[str], list, int]:
@@ -359,6 +366,14 @@ def _build_where(
     conditions: list[str] = []
     params: list = []
     idx = 1
+
+    # Always-on Buy Now vs Pre-Distress gate (migration 012). DEFAULT 'buy_now' keeps the
+    # standard feed clean + backward-compatible (every legacy row is buy_now). 'distress_signal'
+    # = the surfaced lead view; 'all' = both. This is the server side of the UI stage toggle.
+    if distress_stage and distress_stage != "all":
+        conditions.append(f"l.distress_stage = ${idx}")
+        params.append(distress_stage)
+        idx += 1
 
     if source_site:
         conditions.append(f"l.source_site = ${idx}")
@@ -459,6 +474,7 @@ async def list_listings(
     county: str | None = Query(default=None),
     city: str | None = Query(default=None),
     signal_type: str | None = Query(default=None),
+    distress_stage: str = Query(default="buy_now", description="buy_now (default) | distress_signal | all — Buy Now vs Pre-Distress toggle"),
     redemption_status: str | None = Query(default=None, description="TN tax-deed lifecycle: pending|redeemed|final"),
     has_signals: bool | None = Query(default=None),
     min_signals: int | None = Query(default=None, ge=0),
@@ -494,6 +510,7 @@ async def list_listings(
         has_signals=has_signals,
         min_signals=min_signals,
         q=q,
+        distress_stage=distress_stage,
         include_duplicates=include_duplicates,
         include_unverified=include_unverified,
     )

@@ -41,6 +41,11 @@ _SOURCE_META: dict[str, tuple[str | None, str]] = {
     "Shelby Delinquent Tax": ("https://www.shelbycountytrustee.com/259/Delinquent-Realty-Lawsuit-List", "signal"),
     "Shelby Evictions": ("https://data.midsouth.io/", "signal"),
     "Shelby County Parcels (ReGIS)": ("https://scgis.shelbycountytn.gov/", "registry"),
+    # Pre-distress LEADS: signal parcels surfaced as distress_stage='distress_signal'
+    # listings (migration 012). category "lead" so the UI groups them under Pre-Distress,
+    # distinct from the raw "signal" sources above that feed them.
+    "Shelby Tax Delinquent (Lead)": ("https://www.shelbycountytrustee.com/259/Delinquent-Realty-Lawsuit-List", "lead"),
+    "Shelby Eviction (Lead)": ("https://data.midsouth.io/", "lead"),
 }
 
 

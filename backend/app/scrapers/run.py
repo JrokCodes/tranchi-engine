@@ -58,6 +58,7 @@ from app.scrapers.code_violations import (  # noqa: E402
     upsert_signals as _cv_upsert_signals,
 )
 from app.scrapers.db import upsert_listings  # noqa: E402
+from app.scrapers.surface_distress import surface_distress_leads  # noqa: E402
 from app.scrapers.delinquent_tax import DelinquentTaxScraper  # noqa: E402
 from app.scrapers.dln import DLNScraper  # noqa: E402
 from app.scrapers.forfeited_land import ForfeitedLandScraper  # noqa: E402
@@ -854,15 +855,23 @@ async def main() -> int:
             delisted = await _mark_stale_listings(pool, results, run_start)
             expired = await _mark_expired_listings(pool)
             stubs = await _ensure_parcels_for_listings(pool)
+            # Surface pre-distress signal parcels as distress_stage='distress_signal' LEADS
+            # BEFORE the transfer/dedup guards so leads get the same off-market + dedup
+            # treatment as buy-now deals (migration 012).
+            lead_stats = await surface_distress_leads(pool)
             no_num = await _flag_incomplete_addresses(pool)
             transferred = await _mark_transferred_listings(pool)
             redeem_win = await _compute_redemption_windows(pool)
             finalized = await _finalize_expired_redemptions(pool)
             dupes = await _dedup_cross_source_listings(pool)
+            leads_ins = sum(s.get("inserted", 0) for s in lead_stats.values())
+            leads_ret = sum(s.get("retired", 0) + s.get("retired_disabled", 0) for s in lead_stats.values())
             logger.info(
-                "Post-run: %d delisted, %d expired, %d parcel-stubs, %d no-number, "
-                "%d transferred, %d redemption-windows, %d finalized, %d dupes",
-                delisted, expired, stubs, no_num, transferred, redeem_win, finalized, dupes,
+                "Post-run: %d delisted, %d expired, %d parcel-stubs, %d distress-leads(+) "
+                "%d distress-leads(-), %d no-number, %d transferred, %d redemption-windows, "
+                "%d finalized, %d dupes",
+                delisted, expired, stubs, leads_ins, leads_ret, no_num, transferred,
+                redeem_win, finalized, dupes,
             )
 
         total_errors = sum(r.errors for r in results)
