@@ -725,6 +725,19 @@ async def verify_one(row: dict, client: httpx.AsyncClient) -> dict:
         elif sig == "probate":
             # TN probate uses a different case_status format — verify_probate handles both.
             src_result = await verify_probate(row)
+        elif sig in ("tax_delinquent", "eviction"):
+            # Pre-distress LEADS (distress_stage='distress_signal'). No clean per-row live web
+            # source to re-fetch (Trustee delinquent-lawsuit list / civil eviction docket).
+            # surface_distress refreshes a lead's last_seen_at ONLY while its backing signal is
+            # fresh, so a fresh listing ⟹ the signal is still present. The ArcGIS registry
+            # cross-cut below confirms the parcel owner hasn't changed (not sold) =
+            # freshness + registry, the chosen lead-verify approach.
+            label = (
+                "Shelby Tax Delinquent lead (Trustee delinquent-lawsuit list)"
+                if sig == "tax_delinquent"
+                else "Shelby Eviction lead (Data Midsouth feed)"
+            )
+            src_result = await verify_tn_freshness_fallback(row, label)
         else:
             src_result = {"verdict": "ERROR", "evidence": f"no TN verifier for signal_type={sig}"}
 

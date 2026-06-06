@@ -171,7 +171,13 @@ async def surface_distress_leads(pool: asyncpg.Pool, *, dry_run: bool = False) -
             await conn.execute(refresh_sql, ss, src, st)
             active = int(await conn.fetchval(
                 "SELECT count(*) FROM tranchi.listings WHERE source_site=$1 AND status='active'", ss) or 0)
-            await _record_run(conn, ss, found=active, active=active, new_today=inserted)
+            # found = live UPSTREAM fresh-signal count (not =active) so audit_scrapers can detect
+            # a signal-feed collapse: if the tax_delinquent/eviction scraper dies, this drops while
+            # active lingers, surfacing the outage that active-only counts would hide.
+            fresh_signals = int(await conn.fetchval(
+                f"SELECT count(DISTINCT parcel_number) FROM tranchi.signals "
+                f"WHERE source=$1 AND signal_type=$2 AND last_seen_at >= {_FRESH}", src, st) or 0)
+            await _record_run(conn, ss, found=fresh_signals, active=active, new_today=inserted)
             stats[st] = {"enabled": True, "inserted": inserted, "retired": retired,
                          "active_total": active}
             logger.info("[%s] inserted %d, retired %d, active now %d", ss, inserted, retired, active)

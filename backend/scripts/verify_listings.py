@@ -315,6 +315,37 @@ def _make_shelby_market() -> dict:
                 "Trustee shows a recent transfer date after our scrape date."
             ),
         },
+        # Pre-Distress LEADS (distress_stage='distress_signal') — NOT for-sale listings;
+        # off-market motivated-owner leads. Validity = owner still in distress + not sold + off-market.
+        "tax_delinquent": {
+            "valid": (
+                "This is a PRE-DISTRESS LEAD: the owner is being sued for unpaid taxes (open lien, "
+                "well past 12 months). On the Trustee page: PRIMARY OWNER should be a PRIVATE party "
+                "(person/LLC), and TAX DUE / TOTAL BALANCE should be > $0 (often a multi-year balance). "
+                "Off-market on Zillow/Redfin = good (the owner hasn't listed — exactly the off-market lead). "
+                "A 'TAX SALE PROPERTY NOTICE' block appearing means the delinquency has escalated to a "
+                "scheduled auction (the lead is graduating to a tax_deed deal)."
+            ),
+            "red_flags": (
+                "TAX DUE = $0 on the Trustee page = owner paid off; lead is dead. Owner already shows as "
+                "the county / land bank = the county took it (it's a land-bank deal now, not a lead). "
+                "Parcel recently transferred to a new private owner = sold; back-tax pressure gone. "
+                "Actively listed for sale on Zillow/Redfin = not really off-market (note it)."
+            ),
+        },
+        "eviction": {
+            "valid": (
+                "This is a PRE-DISTRESS LEAD: a tired landlord clearing a problem tenant (motivated seller). "
+                "On the Trustee page: confirm the parcel exists and the PRIMARY OWNER still matches our stored "
+                "owner (the distressed landlord), i.e. NOT recently sold. Off-market on Zillow/Redfin = good. "
+                "Eviction is weaker off-market than tax-distress (landlords sometimes list after clearing a "
+                "tenant), so the Zillow/Redfin off-market check matters more here."
+            ),
+            "red_flags": (
+                "Parcel recently transferred to a new owner = already sold (stale lead). Actively listed for "
+                "sale on Zillow/Redfin = the landlord is already selling on-market (weaker lead — note it)."
+            ),
+        },
     }
 
     return {
@@ -324,11 +355,15 @@ def _make_shelby_market() -> dict:
         "deal_sources": (
             "tax_deed",
             "land_bank_inventory",
+            "tax_delinquent",   # Pre-Distress LEAD (Trustee delinquent-lawsuit list)
+            "eviction",         # Pre-Distress LEAD (Data Midsouth tired-landlord)
         ),
         "source_sites": {
             "Shelby County Tax Sale": "tax_deed",
             "Shelby County Land Bank": "land_bank_inventory",
             "Memphis MMLBA": "land_bank_inventory",
+            "Shelby Tax Delinquent (Lead)": "tax_delinquent",
+            "Shelby Eviction (Lead)": "eviction",
         },
         "registry_link": registry_link,
         "registry_label": "Shelby County Trustee — One-Click Parcel Page",
@@ -459,6 +494,13 @@ def _source_and_check(r: asyncpg.Record, market: dict) -> tuple[str, str]:
                 chk = (f"(1) Trustee page: PRIMARY OWNER = 'SHELBY COUNTY TAX SALE' or similar  "
                        f"(2) On Shelby Land Bank portal (ePropertyPlus — search parcel {parcel})  "
                        f"(3) Redfin/Zillow off-market = expected (county-owned)  -- {addr_hint}")
+        elif sig == "tax_delinquent":
+            chk = (f"PRE-DISTRESS LEAD: (1) Trustee page: TAX DUE > $0, PRIMARY OWNER = private party (not county)  "
+                   f"(2) Owner not recently transferred (still the distressed owner)  "
+                   f"(3) Redfin/Zillow OFF-market = good (motivated, not yet listed)  -- {addr_hint}")
+        elif sig == "eviction":
+            chk = (f"PRE-DISTRESS LEAD (tired landlord): (1) Trustee page: parcel {parcel} owner matches, not recently sold  "
+                   f"(2) Redfin/Zillow OFF-market = good (weaker off-market than tax-distress — check this)  -- {addr_hint}")
         else:
             chk = f"(1) Trustee page: parcel {parcel} exists, owner matches  (2) Redfin/Zillow check  -- {addr_hint}"
 
@@ -892,6 +934,40 @@ def _build_layer1_shelby(r: asyncpg.Record, sig: str, source_site: str,
                 ("Owner (Trustee — should be Shelby County)", r["owner_name"] or "(not enriched)"),
             ],
         }
+    elif sig in ("tax_delinquent", "eviction"):
+        # Pre-Distress LEAD — Trustee parcel page is the authority (shows owner + tax balance).
+        guide = vguide.get(sig, {})
+        layer_url = trustee_url or trustee_fallback
+        is_tax = sig == "tax_delinquent"
+        return {
+            "title": ("Shelby County Trustee — Parcel Page (Tax-Delinquent Lead)"
+                      if is_tax else "Shelby County Trustee — Parcel Page (Eviction Lead)"),
+            "url": layer_url,
+            "search_for": (
+                (f"PRE-DISTRESS LEAD. Open the Trustee parcel page. "
+                 + ("Confirm TAX DUE / TOTAL BALANCE > $0 and PRIMARY OWNER is a private party. "
+                    "A 'TAX SALE PROPERTY NOTICE' block = it has escalated to a scheduled auction."
+                    if is_tax else
+                    "Confirm the PRIMARY OWNER still matches our stored owner (the distressed landlord) "
+                    "and the parcel hasn't recently transferred (sold)."))
+                if trustee_url else
+                f"No direct link yet (native_parcel_id not populated). Open Trustee PropertyClient at "
+                f"{trustee_fallback} and {trustee_search_hint}."
+            ),
+            "look_for": (
+                f"{guide.get('valid', '')} "
+                f"Red flags: {guide.get('red_flags', '')}"
+            ),
+            "stored": [
+                ("Signal Type", sig),
+                ("Parcel (14-digit canonical)", parcel),
+                ("Native Parcel ID (for Trustee URL)", native_id_label),
+                ("Source Site", source_site),
+                ("Property Address", r["property_address"] or "—"),
+                ("First Seen By Us", first_seen_label),
+                ("Owner (Trustee — should be the distressed private owner)", r["owner_name"] or "(not enriched)"),
+            ],
+        }
     else:
         layer_url = trustee_url or trustee_fallback
         return {
@@ -1066,6 +1142,8 @@ def _get_guide_for_layer1(r: asyncpg.Record, market: dict) -> dict | None:
     elif sig == "probate":
         return vguide.get("probate")
     elif sig in ("tax_delinquent_foreclosure", "forfeited_land", "mortgage_foreclosure"):
+        return vguide.get(sig)
+    elif sig in ("tax_delinquent", "eviction"):
         return vguide.get(sig)
     return None
 
