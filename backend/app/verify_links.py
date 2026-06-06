@@ -17,14 +17,22 @@ from __future__ import annotations
 import urllib.parse
 
 
+def _compose(addr: str, city: str | None, state: str | None, zip_: str | None) -> str:
+    """One clean address string. Some sources (probate) already store a full
+    'street, city, ST zip' in property_address — appending the columns again would
+    duplicate the city/state/zip. So if the address already has a comma, use it as-is;
+    only street-only addresses get the columns appended."""
+    if "," in addr:
+        return addr
+    return ", ".join(p for p in (addr, city, state, zip_) if p)
+
+
 def _zillow(addr: str, city: str | None, state: str | None, zip_: str | None) -> str:
-    q = " ".join(p for p in (addr, city, state, zip_) if p)
-    return "https://www.zillow.com/homes/" + urllib.parse.quote(q) + "_rb/"
+    return "https://www.zillow.com/homes/" + urllib.parse.quote(_compose(addr, city, state, zip_)) + "_rb/"
 
 
 def _redfin(addr: str, city: str | None, state: str | None, zip_: str | None) -> str:
-    q = ", ".join(p for p in (addr, city, state, zip_) if p)
-    return "https://www.google.com/search?q=" + urllib.parse.quote(f"site:redfin.com {q}")
+    return "https://www.google.com/search?q=" + urllib.parse.quote(f"site:redfin.com {_compose(addr, city, state, zip_)}")
 
 
 def _registry(state: str | None, native_parcel_id: str | None,
