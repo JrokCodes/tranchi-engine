@@ -108,11 +108,15 @@ async def surface_distress_leads(pool: asyncpg.Pool, *, dry_run: bool = False) -
             insert_sql = f"""
                 INSERT INTO tranchi.listings
                     (source_site, signal_type, distress_stage, status,
-                     property_address, property_state, property_county,
+                     property_address, property_city, property_zip, property_state, property_county,
                      source_listing_id, trustee_name, first_seen_at, last_seen_at)
                 SELECT DISTINCT ON (s.parcel_number)
                     $1, $3, 'distress_signal', 'active',
                     COALESCE(NULLIF(p.situs_address,''), s.payload->>'property_location'),
+                    -- city/zip parsed from the spine situs ("STREET, MEMPHIS, TN 38xxx"); the
+                    -- payload location is street-only so it leaves these NULL (verify by parcel).
+                    initcap(substring(p.situs_address from ',\\s*([A-Za-z .]+?),\\s*TN')),
+                    substring(p.situs_address from '\\y(\\d{{5}})(?:-\\d{{4}})?\\y'),
                     'TN', 'Shelby',
                     s.parcel_number,
                     COALESCE(p.owner_name, s.payload->>'owner'),
