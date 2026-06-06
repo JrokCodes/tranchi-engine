@@ -127,8 +127,21 @@ def _decide(row: asyncpg.Record, case_explosion: bool) -> tuple[str, dict]:
     decedent = (row["decedent_name"] or "").strip()
     owner = (row["owner_name"] or "").strip()
 
-    # Address-anchored joins are authoritative — keep as confirmed (even in an explosion).
+    # Address-anchored joins are authoritative for a normal single-home match.
     if method in _ANCHOR_METHODS:
+        # EXCEPTION — address explosion: when one decedent address resolves to many
+        # parcels (> _AMBIGUITY_CAP) it is a multi-unit building (condo/apartment) and
+        # the decedent owns only ONE unit. Corroborate each unit by its CURRENT owner;
+        # retire the units that aren't the decedent's (guards case 2026EST307403 → 122
+        # Edgewater Dr condo units, none owned by the decedent). Mirrors the live
+        # scraper's Step-4b address-anchor explosion guard.
+        if (row["case_count"] or 0) > _AMBIGUITY_CAP:
+            if not decedent or not owner:
+                # can't verify yet (parcel not enriched) — hide to heal on a later run
+                return "hide", {"match_confidence": "unverified"}
+            if _name_confidence(decedent, owner) < _MIN_CONFIDENCE:
+                return "retire", {}  # this unit's owner is not the decedent
+            # owner corroborates the decedent — fall through and keep confirmed
         if row["match_confidence"] == "confirmed":
             return "noop", {}
         return "keep_confirmed", {

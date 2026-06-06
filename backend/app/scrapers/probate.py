@@ -685,6 +685,26 @@ class ProbateScraper(ListingScraper):
                             decedent_address, case_number, exc,
                         )
 
+                # ── Step 4b: Address-anchor explosion guard (multi-unit building) ──
+                # address_anchor is "always emit" for a normal single home. But a
+                # decedent address that resolves to MANY parcels (> _AMBIGUITY_CAP) is a
+                # condo/apartment building, and the decedent owns only ONE unit — not all
+                # of them. Without this guard one estate attaches every unit of a building
+                # (real case 2026EST307403 → 122 units at 12500 Edgewater Dr, none owned
+                # by the decedent). Keep only the address parcels the owner-name search
+                # ALSO matched (search_by_owner is gated on _name_confidence), dropping the
+                # rest. A legitimate owner of several parcels at one address still survives
+                # because the name search returns them too.
+                if len(addr_hits) > _AMBIGUITY_CAP:
+                    corroborated = {p: m for p, m in addr_hits.items() if p in name_hits}
+                    logger.info(
+                        "Case %s: address %r resolved to %d parcels (multi-unit building) "
+                        "— keeping %d owner-corroborated, dropping %d address-only.",
+                        case_number, decedent_address, len(addr_hits),
+                        len(corroborated), len(addr_hits) - len(corroborated),
+                    )
+                    addr_hits = corroborated
+
                 # ── Step 5: Classify + emit (PRECISION-FIRST) ─────────────────
                 # A name-only join is the mis-join risk (common surnames). Emit a parcel
                 # only when it is ADDRESS-anchored, OR the name search is unambiguous
