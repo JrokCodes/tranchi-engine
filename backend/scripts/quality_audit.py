@@ -46,7 +46,7 @@ if _env_file.exists():
 
 import asyncpg  # noqa: E402
 
-from app.scrapers.staleness import StalenessPolicy, policy_for  # noqa: E402
+from app.scrapers.staleness import StalenessPolicy, policy_for, SOURCE_STALENESS  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -208,11 +208,10 @@ async def check_stale_active_leak(conn: asyncpg.Connection) -> list[dict[str, An
     CURSOR (Probate) and ARCHIVE (Sheriff Sales history) sources are explicitly
     excluded — staleness by time is not meaningful for them. See staleness.py.
     """
+    # Market-aware: derive ALL FULL_RESCAN sources from staleness.py (both Cuyahoga + Shelby,
+    # and any future source) instead of a hardcoded OH-only list.
     full_rescan_sources = [
-        site for site, policy in [
-            ("Cuyahoga Sheriff Sale (DLN)", policy_for("Cuyahoga Sheriff Sale (DLN)")),
-            ("Cuyahoga Land Bank", policy_for("Cuyahoga Land Bank")),
-        ]
+        site for site, policy in SOURCE_STALENESS.items()
         if policy == StalenessPolicy.FULL_RESCAN
     ]
     if not full_rescan_sources:
@@ -231,6 +230,10 @@ async def check_stale_active_leak(conn: asyncpg.Connection) -> list[dict[str, An
           AND duplicate_of IS NULL
           AND source_site IN ({placeholders})
           AND last_seen_at < NOW() - INTERVAL '{_STALE_ACTIVE_HOURS} hours'
+          -- mirror run.py::_mark_stale_listings: a TN tax_deed parcel legitimately leaves
+          -- the pre-sale catalog once it sells / enters redemption, so absence != stale leak.
+          AND NOT (signal_type = 'tax_deed'
+                   AND (redemption_status = 'pending' OR sale_date < CURRENT_DATE))
     """, *full_rescan_sources)
     return [{
         "listing_id": r["id"],
@@ -293,19 +296,24 @@ async def check_probate_validity(conn: asyncpg.Connection) -> list[dict[str, Any
     closed_rows = await conn.fetch("""
         SELECT
             id::text,
+            source_site,
             property_address,
             case_number,
             case_status,
             case_status_date
         FROM tranchi.listings
-        WHERE source_site = 'Cuyahoga Probate Court'
+        WHERE signal_type = 'probate'
           AND status = 'active'
           AND duplicate_of IS NULL
-          AND upper(case_status) = ANY($1::text[])
+          -- market-aware: Cuyahoga stores a bare code ('CLOSED'); Shelby stores
+          -- 'CODE - LABEL' (e.g. 'CLOSED - CLOSED'). Match either side so both formats hit.
+          AND (split_part(upper(case_status), ' - ', 1) = ANY($1::text[])
+               OR split_part(upper(case_status), ' - ', 2) = ANY($1::text[]))
     """, list(_CLOSED_CASE_STATUSES))
     for r in closed_rows:
         findings.append({
             "sub_check": "closed_case_still_active",
+            "source": r["source_site"],
             "listing_id": r["id"],
             "address": r["property_address"],
             "case_number": r["case_number"],
@@ -316,18 +324,22 @@ async def check_probate_validity(conn: asyncpg.Connection) -> list[dict[str, Any
     # Sub-check 2: match_confidence tier summary (informational — never an alert on its own)
     tier_rows = await conn.fetch("""
         SELECT
+            source_site,
             COALESCE(match_confidence, 'NULL') AS tier,
             COUNT(*) AS n
         FROM tranchi.listings
-        WHERE source_site = 'Cuyahoga Probate Court'
+        WHERE signal_type = 'probate'
           AND status = 'active'
           AND duplicate_of IS NULL
-        GROUP BY tier
-        ORDER BY n DESC
+        GROUP BY source_site, tier
+        ORDER BY source_site, n DESC
     """)
+    tiers_by_source: dict[str, dict[str, int]] = {}
+    for r in tier_rows:
+        tiers_by_source.setdefault(r["source_site"], {})[r["tier"]] = r["n"]
     findings.append({
         "sub_check": "match_confidence_summary",
-        "tiers": {r["tier"]: r["n"] for r in tier_rows},
+        "tiers_by_source": tiers_by_source,
     })
     return findings
 
@@ -350,19 +362,23 @@ async def check_probate_join_sanity(conn: asyncpg.Connection) -> list[dict[str, 
     _OVERMATCH_CAP = 8  # a real person rarely owns >8 parcels; explosions were 100s
     findings: list[dict[str, Any]] = []
 
+    # Market-aware: covers both Cuyahoga + Shelby probate (group by source so a case_number
+    # that collides across markets isn't merged). Catches the condo/multi-unit address-anchor
+    # explosion in EITHER market (the 2026-06-06 fix prevents it; this is the daily tripwire).
     overmatched = await conn.fetch("""
-        SELECT case_number, COUNT(DISTINCT source_listing_id) AS n
+        SELECT source_site, case_number, COUNT(DISTINCT source_listing_id) AS n
         FROM tranchi.listings
-        WHERE source_site = 'Cuyahoga Probate Court'
+        WHERE signal_type = 'probate'
           AND status = 'active'
           AND duplicate_of IS NULL
-        GROUP BY case_number
+        GROUP BY source_site, case_number
         HAVING COUNT(DISTINCT source_listing_id) > $1
         ORDER BY n DESC
     """, _OVERMATCH_CAP)
     for r in overmatched:
         findings.append({
             "type": "overmatched_case",
+            "source": r["source_site"],
             "case_number": r["case_number"],
             "parcel_count": r["n"],
             "cap": _OVERMATCH_CAP,
@@ -370,7 +386,7 @@ async def check_probate_join_sanity(conn: asyncpg.Connection) -> list[dict[str, 
 
     shown_no_decedent = await conn.fetchval("""
         SELECT COUNT(*) FROM tranchi.listings
-        WHERE source_site = 'Cuyahoga Probate Court'
+        WHERE signal_type = 'probate'
           AND status = 'active'
           AND duplicate_of IS NULL
           AND match_confidence IN ('confirmed', 'probable')
