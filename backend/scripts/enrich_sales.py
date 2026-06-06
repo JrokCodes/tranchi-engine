@@ -62,6 +62,9 @@ async def _pick_targets(
             FROM tranchi.listings l
             JOIN tranchi.parcels p ON p.parcel_number = l.source_listing_id
             WHERE l.status = 'active' AND l.signal_type = 'probate'
+              -- CROSS-COUNTY GUARD: sale enrichment is Cuyahoga MyPlace (Playwright).
+              -- TN parcels would only miss or risk corruption — scope to OH.
+              AND l.property_state = 'OH'
               AND l.source_listing_id IS NOT NULL
               AND p.last_sale_date IS NULL
             ORDER BY l.first_seen_at DESC
@@ -69,7 +72,8 @@ async def _pick_targets(
         )
         return [r["parcel"] for r in rows]
 
-    where = "l.status = 'active' AND l.source_listing_id IS NOT NULL AND p.last_sale_date IS NULL"
+    # CROSS-COUNTY GUARD: sale enrichment is Cuyahoga MyPlace — scope to OH (see above).
+    where = "l.status = 'active' AND l.property_state = 'OH' AND l.source_listing_id IS NOT NULL AND p.last_sale_date IS NULL"
     params: list = []
     if signal:
         where += " AND l.signal_type = $1"

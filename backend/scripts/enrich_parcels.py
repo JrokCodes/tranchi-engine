@@ -51,6 +51,11 @@ async def _targets(conn: asyncpg.Connection, limit: int | None) -> list[str]:
         FROM tranchi.listings l
         LEFT JOIN tranchi.parcels p ON p.parcel_number = l.source_listing_id
         WHERE l.status = 'active'
+          -- CROSS-COUNTY GUARD: fiscal_officer enrichment IS Cuyahoga MyPlace. Never
+          -- target TN/Shelby parcels here — they enrich from the Shelby ArcGIS spine
+          -- (shelby_parcels.py). Without this, a 14-char TN parcel can fall back to
+          -- hits[0] below and be written a Cuyahoga parcel's owner/situs (corruption).
+          AND l.property_state = 'OH'
           AND l.source_listing_id IS NOT NULL AND l.source_listing_id <> ''
           AND (p.parcel_number IS NULL OR p.owner_name IS NULL)
     """
