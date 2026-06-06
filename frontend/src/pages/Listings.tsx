@@ -47,6 +47,7 @@ export default function Listings() {
       county: searchParams.get('county') ?? '',
       source_site: searchParams.get('source_site') ?? '',
       status: searchParams.get('status') ?? 'active',
+      distress_stage: searchParams.get('distress_stage') ?? 'buy_now',
       has_signals: searchParams.get('has_signals') === 'true',
       q: searchParams.get('q') ?? '',
       sort: (searchParams.get('sort') as SortKey) ?? 'first_seen_at',
@@ -75,6 +76,8 @@ export default function Listings() {
     if (newFilters.county) next.set('county', newFilters.county);
     if (newFilters.source_site) next.set('source_site', newFilters.source_site);
     if (newFilters.status) next.set('status', newFilters.status);
+    if (newFilters.distress_stage && newFilters.distress_stage !== 'buy_now')
+      next.set('distress_stage', newFilters.distress_stage);
     if (newFilters.has_signals) next.set('has_signals', 'true');
     if (newFilters.q) next.set('q', newFilters.q);
     setSearchParams(next, { replace: true });
@@ -107,6 +110,7 @@ export default function Listings() {
     county: filters.county || undefined,
     source_site: filters.source_site || undefined,
     status: filters.status || undefined,
+    distress_stage: filters.distress_stage || undefined,
     has_signals: filters.has_signals || undefined,
     q: filters.q || undefined,
     sort: sortField,

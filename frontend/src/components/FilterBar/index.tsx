@@ -12,7 +12,16 @@ export interface FilterState {
   q: string;
   sort: string;
   order: 'asc' | 'desc';
+  // buy_now = actively-acquirable deals (default feed); distress_signal = pre-distress
+  // LEADS (tax-delinquent lawsuit / eviction). Composes with county on the server (ANDed),
+  // so Memphis + Buy Now returns only Memphis buy-now listings.
+  distress_stage: string;
 }
+
+export const STAGE_OPTIONS: { label: string; value: string }[] = [
+  { label: 'Buy Now', value: 'buy_now' },
+  { label: 'Pre-Distress', value: 'distress_signal' },
+];
 
 export const defaultFilters: FilterState = {
   county: '',
@@ -24,6 +33,7 @@ export const defaultFilters: FilterState = {
   q: '',
   sort: 'first_seen_at',
   order: 'desc',
+  distress_stage: 'buy_now',
 };
 
 const STATUS_OPTIONS: { label: string; value: string }[] = [
@@ -140,15 +150,17 @@ interface Props {
 export function FilterBar({ filters, onChange, onClear }: Props) {
   const { data: sourcesData } = useSources();
 
-  // Source dropdown is derived from /api/v1/sources (deal sources only), scoped to the
-  // selected market — so Shelby sources appear automatically once the backend reports
-  // them, no hardcoding. When no market is picked, all deal sources show.
-  const dealSources = (sourcesData?.sources ?? [])
-    .filter((s) => s.category === 'deal')
+  // Source dropdown is derived from /api/v1/sources, scoped to the selected market AND
+  // the active stage: Buy Now shows 'deal' sources, Pre-Distress shows 'lead' sources.
+  // So Shelby/lead sources appear automatically once the backend reports them, no
+  // hardcoding. When no market is picked, all sources for the stage show.
+  const stageCategory = filters.distress_stage === 'distress_signal' ? 'lead' : 'deal';
+  const stageSources = (sourcesData?.sources ?? [])
+    .filter((s) => s.category === stageCategory)
     .map((s) => s.source_site);
   const sourceOptions = (filters.county
-    ? dealSources.filter((s) => sourceInCounty(s, filters.county))
-    : dealSources
+    ? stageSources.filter((s) => sourceInCounty(s, filters.county))
+    : stageSources
   ).sort();
 
   // Switching market clears a source that doesn't belong to the new market.
@@ -156,6 +168,12 @@ export function FilterBar({ filters, onChange, onClear }: Props) {
     const keepSource =
       !filters.source_site || !county || sourceInCounty(filters.source_site, county);
     onChange({ ...filters, county, source_site: keepSource ? filters.source_site : '' });
+  }
+
+  // Switching stage clears the source (deal vs lead source lists are disjoint).
+  function handleStageChange(stage: string) {
+    if (stage === filters.distress_stage) return;
+    onChange({ ...filters, distress_stage: stage, source_site: '' });
   }
 
   const isFiltered =
@@ -167,6 +185,27 @@ export function FilterBar({ filters, onChange, onClear }: Props) {
 
   return (
     <div className="flex flex-wrap items-center gap-2">
+      {/* Buy Now vs Pre-Distress stage toggle — the primary view switch. Composes with
+          Market on the server (ANDed), so Memphis + Buy Now = only Memphis buy-now. */}
+      <div className="inline-flex items-center rounded-full border border-(--color-border) bg-white p-0.5">
+        {STAGE_OPTIONS.map((opt) => (
+          <button
+            key={opt.value}
+            type="button"
+            onClick={() => handleStageChange(opt.value)}
+            aria-pressed={filters.distress_stage === opt.value}
+            className={cn(
+              'h-8 px-3.5 text-[13px] font-medium rounded-full transition-colors whitespace-nowrap',
+              filters.distress_stage === opt.value
+                ? 'bg-(--color-navy) text-white'
+                : 'text-(--color-slate) hover:text-(--color-ink)'
+            )}
+          >
+            {opt.label}
+          </button>
+        ))}
+      </div>
+
       {/* Address search */}
       <div className="relative">
         <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-(--color-muted) pointer-events-none" />

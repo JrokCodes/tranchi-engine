@@ -10,6 +10,7 @@ export interface ListingFilters {
   county?: string;
   city?: string;
   signal_type?: string;
+  distress_stage?: string;
   has_signals?: boolean;
   min_signals?: number;
   q?: string;
@@ -29,6 +30,7 @@ export function buildParams(filters: ListingFilters, page: number, pageSize = 50
   if (filters.county) p.set('county', filters.county);
   if (filters.city) p.set('city', filters.city);
   if (filters.signal_type) p.set('signal_type', filters.signal_type);
+  if (filters.distress_stage) p.set('distress_stage', filters.distress_stage);
   if (filters.has_signals != null) p.set('has_signals', String(filters.has_signals));
   if (filters.min_signals != null) p.set('min_signals', String(filters.min_signals));
   if (filters.q) p.set('q', filters.q);

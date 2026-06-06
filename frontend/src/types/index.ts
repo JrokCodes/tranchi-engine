@@ -47,6 +47,8 @@ export interface ApiListingItem {
   trustee_name: string | null;
   case_number: string | null;
   source_listing_id: string | null;
+  // buy_now (acquirable deal) | distress_signal (pre-distress lead). Drives the stage view.
+  distress_stage: string | null;
   // Probate validity + decedent identity (null for non-probate; surfaced for the probate card).
   case_status: string | null;
   case_status_date: string | null;
