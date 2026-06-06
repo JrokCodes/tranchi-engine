@@ -99,6 +99,11 @@ async def _backfill_decedent_fields(conn: asyncpg.Connection, *, dry_run: bool) 
 
 
 async def _pick_listings(conn: asyncpg.Connection, *, limit: int | None) -> list[asyncpg.Record]:
+    # MARKET-AGNOSTIC BY DESIGN (both OH + TN probate). This recomputes join quality from data
+    # already in the DB — _name_confidence(decedent_name, parcels.owner_name) is pure Levenshtein,
+    # no MyPlace/OH-specific fetch — and OH (DDD-NN-NNN) vs TN (14-char) parcel formats can't collide
+    # in the parcels join. Do NOT add a property_state='OH' guard: it would wrongly exclude Shelby
+    # probate from join-quality recompute. Audited clean 2026-06-06 (no cross-market contamination).
     rows = await conn.fetch(
         f"""
         SELECT l.id, l.case_number, l.decedent_name, l.source_listing_id AS parcel,
