@@ -293,6 +293,10 @@ def _make_cuyahoga_market() -> dict:
             "Cleveland Code Violations": ("https://data.clevelandohio.gov/", "signal"),
             "Cuyahoga Delinquent Tax": ("https://cuyahogacounty.gov/treasury/delinquency", "signal"),
             "Cuyahoga Fiscal Officer": ("https://myplace.cuyahogacounty.gov", "registry"),
+            # Pre-distress LEADS (surface_distress.py) — category 'lead' groups them under the
+            # Pre-Distress view, not the buy-now deal feed.
+            "Cuyahoga Tax Delinquent (Lead)": ("https://myplace.cuyahogacounty.gov/", "lead"),
+            "Cuyahoga Code Violation (Lead)": ("https://data.clevelandohio.gov/", "lead"),
         },
         # Probate "sold-after-filing" auto-transfer rule (run.py::_mark_transferred_listings).
         # Cuyahoga case numbers encode the filing year as the first 4 chars ('2026EST...').
