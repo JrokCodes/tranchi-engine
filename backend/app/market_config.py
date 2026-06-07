@@ -380,3 +380,36 @@ MARKETS: dict[str, dict] = {
     "cuyahoga": _make_cuyahoga_market(),
     "shelby": _make_shelby_market(),
 }
+
+
+# ---------------------------------------------------------------- scraper registry
+# Which scraper keys (app.scrapers.run._SCRAPERS) belong to each market. This is the
+# "add a market" ergonomic: list a market's scrapers in ONE place instead of scattering
+# them across run.py / staleness.py / prefilter.py. `registry` = the parcel-spine scraper
+# (writes tranchi.parcels only, runs on its own weekly cron, skipped from the 3h full run).
+MARKET_SCRAPERS: dict[str, dict] = {
+    "cuyahoga": {
+        "registry": "fiscal_officer",
+        "deal_and_signal": [
+            "code_violations", "land_bank", "sheriff_sales", "probate", "dln",
+            "forfeited_land", "delinquent_tax",
+        ],
+    },
+    "shelby": {
+        "registry": "shelby_parcels",
+        "deal_and_signal": [
+            "shelby_tax_sale", "shelby_foreclosure", "shelby_delinquent_tax",
+            "shelby_county_landbank", "shelby_mmlba", "shelby_probate", "shelby_evictions",
+        ],
+    },
+}
+
+
+def all_states() -> set[str]:
+    """Every state that has a live market — the prefilter allowlist source of truth."""
+    return {cfg["state"] for cfg in MARKETS.values()}
+
+
+def registry_scraper_keys() -> set[str]:
+    """The parcel-spine scraper keys across all markets (run on their own weekly cron)."""
+    return {m["registry"] for m in MARKET_SCRAPERS.values()}

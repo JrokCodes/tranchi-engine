@@ -21,11 +21,13 @@ Keep this file so the hook exists for future tightening if Marc changes directio
 """
 from __future__ import annotations
 
+from app.market_config import all_states
 from app.scrapers.models import RawListing
 
-# Active-market states. Add a state here when a new market in that state ships,
-# or every listing from it is silently rejected before DB write.
-ALLOWED_STATES = {"OH", "TN"}
+# Active-market states — derived from the market registry (app/market_config.py) so a
+# new market's state is allowed automatically when its MarketConfig is added (no second
+# edit here to forget). Currently {"OH", "TN"}.
+ALLOWED_STATES = all_states()
 
 
 def prefilter(listing: RawListing) -> tuple[bool, str | None]:

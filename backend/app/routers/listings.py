@@ -358,7 +358,11 @@ _BASE_SELECT = """
         ) z
         GROUP BY parcel_number
     ) sig ON sig.parcel_number = l.source_listing_id
-    LEFT JOIN tranchi.parcels p ON p.parcel_number = l.source_listing_id
+    -- Parcel join market-scoped: a listing only enriches from a parcel in its own market
+    -- (structurally prevents cross-market joins; 0 mismatches today). Upgrade to p.market
+    -- when a same-state second county exists.
+    LEFT JOIN tranchi.parcels p
+      ON p.parcel_number = l.source_listing_id AND p.property_state = l.property_state
 """
 
 
