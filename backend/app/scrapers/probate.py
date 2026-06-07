@@ -473,8 +473,8 @@ async def _upsert_probate_signal(
                 """
                 INSERT INTO tranchi.signals
                     (parcel_number, signal_type, source, observed_at,
-                     confidence, payload, first_seen_at, last_seen_at)
-                VALUES ($1, 'probate', 'probate_court', $2, $3, $4::jsonb, $2, $2)
+                     confidence, payload, first_seen_at, last_seen_at, market)
+                VALUES ($1, 'probate', 'probate_court', $2, $3, $4::jsonb, $2, $2, 'cuyahoga')
                 ON CONFLICT DO NOTHING
                 """,
                 parcel_number,
@@ -759,7 +759,7 @@ class ProbateScraper(ListingScraper):
                                 "current_market_value": match.market_value,
                                 "tax_balance_due": match.tax_balance,
                                 "source_url": "https://myplace.cuyahogacounty.gov",
-                            }])
+                            }], market="cuyahoga")
                         except Exception as exc:
                             logger.warning("parcel upsert failed for %s: %s", match.parcel_number, exc)
 

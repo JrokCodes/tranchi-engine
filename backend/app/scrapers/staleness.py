@@ -28,6 +28,8 @@ from __future__ import annotations
 
 from enum import Enum
 
+from app.market_config import merged_staleness_policies
+
 
 class StalenessPolicy(str, Enum):
     FULL_RESCAN = "full_rescan"
@@ -36,26 +38,13 @@ class StalenessPolicy(str, Enum):
 
 
 # Keyed by listing source_site (scraper.site_name as stored in tranchi.listings).
+# The per-source policy now lives in each market's config (market_config.py
+# "staleness_policies"); this dict is the merge across all markets, so adding a market
+# is a config edit, not an edit here. The StalenessPolicy invariant above still governs
+# WHICH policy is correct for a source — declare it in the market config accordingly.
 SOURCE_STALENESS: dict[str, StalenessPolicy] = {
-    "Cuyahoga Sheriff Sale (DLN)": StalenessPolicy.FULL_RESCAN,
-    "Cuyahoga Land Bank": StalenessPolicy.FULL_RESCAN,
-    # Forfeited-land re-pulls the whole locator each run; a parcel that drops off
-    # (redeemed/sold/new cycle) is genuinely gone → safe to retire by absence.
-    "Cuyahoga Forfeited Land": StalenessPolicy.FULL_RESCAN,
-    "Cuyahoga Probate Court": StalenessPolicy.CURSOR,
-    "Cuyahoga Sheriff Sales": StalenessPolicy.ARCHIVE,
-    # Shelby County, TN (Memphis) — all FULL_RESCAN: each re-pulls its whole live set
-    # every run, so a row absent this cycle is genuinely resolved (paid / sold / removed).
-    "Shelby County Tax Sale": StalenessPolicy.FULL_RESCAN,
-    # Foreclosure re-pulls both readers' full current set each run; tnforeclosurenotices
-    # also updates the PP (postponed) Sale Date in place, so absence = sold/cancelled.
-    "Shelby County Foreclosure": StalenessPolicy.FULL_RESCAN,
-    "Shelby County Land Bank": StalenessPolicy.FULL_RESCAN,
-    "Memphis MMLBA": StalenessPolicy.FULL_RESCAN,
-    # Probate is a CURSOR walk (PR-number forward-only), like Cuyahoga's — it can NEVER
-    # be retired by time-not-seen (that wrongly retires the whole back-catalog). It
-    # retires only when shelby_probate_recheck.py finds the case CLOSED/DISPOSED.
-    "Shelby Probate Court": StalenessPolicy.CURSOR,
+    site: StalenessPolicy(policy)
+    for site, policy in merged_staleness_policies().items()
 }
 
 DEFAULT_POLICY = StalenessPolicy.FULL_RESCAN

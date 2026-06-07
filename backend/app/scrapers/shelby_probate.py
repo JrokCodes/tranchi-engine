@@ -372,8 +372,8 @@ async def _upsert_signal(pool: Any, parcel: str, case_id: str, decedent: str, sc
                 """
                 INSERT INTO tranchi.signals
                     (parcel_number, signal_type, source, observed_at, confidence, payload,
-                     first_seen_at, last_seen_at)
-                VALUES ($1, 'probate', $2, $3, $4, $5::jsonb, $3, $3)
+                     first_seen_at, last_seen_at, market)
+                VALUES ($1, 'probate', $2, $3, $4, $5::jsonb, $3, $3, 'shelby')
                 ON CONFLICT DO NOTHING
                 """,
                 parcel, SIGNAL_SOURCE, now, score, payload,

@@ -64,17 +64,25 @@ if _env.exists():
 import asyncpg  # noqa: E402
 import httpx  # noqa: E402
 
+from app.market_config import MARKETS  # noqa: E402
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("source_check")
+
+# Verifier endpoints are sourced from each market's config (market_config.py
+# "verifier_endpoints") — the single home for a market's verifier URLs. A new market
+# declares its endpoints there; the verifier functions below read them via these aliases.
+_OH_ENDPOINTS = MARKETS["cuyahoga"]["verifier_endpoints"]
+_TN_ENDPOINTS = MARKETS["shelby"]["verifier_endpoints"]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # OH (Cuyahoga) constants — only ever used for rows where property_state='OH'
 # ─────────────────────────────────────────────────────────────────────────────
-OH_DLN_API = "https://www.dln.com/wp-json/dln/v1/data-table"
+OH_DLN_API = _OH_ENDPOINTS["dln_api"]
 OH_DLN_PER_PAGE = 100
 OH_DLN_MAX_PAGES = 70
-OH_LANDBANK_URL = "https://cuyahogalandbank.org/all-available-properties/"
-OH_MYPLACE_BASE = "https://myplace.cuyahogacounty.gov"
+OH_LANDBANK_URL = _OH_ENDPOINTS["landbank_url"]
+OH_MYPLACE_BASE = _OH_ENDPOINTS["myplace_base"]
 # Cuyahoga parcel format: NNN-NN-NNN (e.g. 203-28-051)
 OH_PARCEL_RE = re.compile(r"\b(\d{3}-\d{2}-\d{3})\b")
 
@@ -82,10 +90,7 @@ OH_PARCEL_RE = re.compile(r"\b(\d{3}-\d{2}-\d{3})\b")
 # TN (Shelby) constants — only ever used for rows where property_state='TN'
 # ─────────────────────────────────────────────────────────────────────────────
 # ePropertyPlus API (mirrors shelby_county_landbank.py constants)
-TN_EPROPERTYPLUS_API = (
-    "https://public-sctn.epropertyplus.com"
-    "/landmgmtpub/remote/public/property/getPublishedProperties"
-)
+TN_EPROPERTYPLUS_API = _TN_ENDPOINTS["epropertyplus_api"]
 TN_EPROPERTYPLUS_PAGE_SIZE = 200
 TN_EPROPERTYPLUS_MAX_PAGES = 150
 TN_EPROPERTYPLUS_JSON_PARAM = '{"criterias":[]}'
@@ -93,15 +98,12 @@ TN_EPROPERTYPLUS_ACTIVE_STATUS = "FOR SALE"
 TN_EPROPERTYPLUS_ACTIVE_AVAILABLE = "Y"
 
 # Tax Sale CSV (mirrors shelby_tax_sale.py)
-TN_TAX_SALE_CSV_URL = "https://scgpublic.s3.amazonaws.com/TaxSaleExtract.csv"
+TN_TAX_SALE_CSV_URL = _TN_ENDPOINTS["tax_sale_csv_url"]
 # Column that carries the canonical 14-char parcel (matches source_listing_id in DB)
 TN_TAX_SALE_PARCEL_COL = "Alt_Parcel"
 
 # ArcGIS parcel layer (mirrors shelby_parcels.py)
-TN_ARCGIS_QUERY_URL = (
-    "https://scgis.shelbycountytn.gov/serverhigh/rest/services/"
-    "Parcel/CurrentParcels/MapServer/0/query"
-)
+TN_ARCGIS_QUERY_URL = _TN_ENDPOINTS["arcgis_query_url"]
 TN_ARCGIS_PARCEL_FIELD = "PARCELID"   # spaced canonical from ReGIS (e.g. '072047  00016')
 TN_ARCGIS_PAID_FIELD = "PAID"         # compact form (e.g. '07204700016')
 TN_ARCGIS_OWNER_FIELD = "OWNER"

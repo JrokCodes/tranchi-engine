@@ -49,6 +49,7 @@ from typing import Any
 
 import asyncpg
 
+from app.market_config import state_for_market
 from app.scrapers._time import today_et, n_days_ago_et
 from app.scrapers.arcgis_client import count_features, query_features
 from app.scrapers.base import SignalScraper
@@ -344,9 +345,15 @@ async def upsert_signals(
     pool: asyncpg.Pool,
     signals: list[RawSignal],
     *,
+    market: str,
     dry_run: bool = False,
 ) -> dict[str, int]:
     """Write RawSignal rows to tranchi.signals.
+
+    `market` is the market slug these signals belong to (the GENERIC signal upserter
+    used by every SignalScraper via run.py — code_violations/delinquent_tax => cuyahoga,
+    shelby_* => shelby). It tags the signal row + any FK stub parcel with market +
+    property_state so neither lands market=NULL (ITEM-1). Required keyword arg.
 
     Idempotency key: (parcel_number, signal_type, source, observed_at::date).
     Two signals from the same source, same parcel, same type, same calendar day
@@ -372,6 +379,7 @@ async def upsert_signals(
         return {"inserted": 0, "updated": 0, "skipped": 0, "errors": 0}
 
     counters = {"inserted": 0, "updated": 0, "skipped": 0, "errors": 0}
+    property_state = state_for_market(market)
 
     async with pool.acquire() as conn:
         for sig in signals:
@@ -381,15 +389,18 @@ async def upsert_signals(
                 parcel_number = normalize_parcel_number(sig.parcel_number) or sig.parcel_number
 
                 # Stub-upsert into tranchi.parcels to satisfy FK.
-                # ON CONFLICT DO NOTHING: if fiscal_officer has already populated
-                # the full parcel record, we leave it untouched.
+                # ON CONFLICT DO NOTHING: if the spine has already populated the full
+                # parcel record, we leave it untouched. market/property_state come from
+                # the caller's market so a stub never lands market=NULL (ITEM-1).
                 await conn.execute(
                     """
-                    INSERT INTO tranchi.parcels (parcel_number)
-                    VALUES ($1)
+                    INSERT INTO tranchi.parcels (parcel_number, market, property_state)
+                    VALUES ($1, $2, $3)
                     ON CONFLICT (parcel_number) DO NOTHING
                     """,
                     parcel_number,
+                    market,
+                    property_state,
                 )
 
                 # Upsert signal using the natural idempotency key.
@@ -397,13 +408,14 @@ async def upsert_signals(
                 result = await conn.fetchrow(
                     """
                     INSERT INTO tranchi.signals
-                        (parcel_number, signal_type, source, observed_at, confidence, payload)
-                    VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+                        (parcel_number, signal_type, source, observed_at, confidence, payload, market)
+                    VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
                     ON CONFLICT (parcel_number, signal_type, source, ((observed_at AT TIME ZONE 'UTC')::date))
                     DO UPDATE SET
                         last_seen_at = NOW(),
                         confidence   = EXCLUDED.confidence,
-                        payload      = EXCLUDED.payload
+                        payload      = EXCLUDED.payload,
+                        market       = EXCLUDED.market
                     RETURNING (xmax = 0) AS is_insert
                     """,
                     parcel_number,
@@ -412,6 +424,7 @@ async def upsert_signals(
                     sig.observed_at,
                     sig.confidence,
                     _json.dumps(sig.payload),
+                    market,
                 )
                 if result and result["is_insert"]:
                     counters["inserted"] += 1

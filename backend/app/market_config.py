@@ -16,16 +16,22 @@ Always key on the `market` slug (`cuyahoga`, `shelby`, `fayette`, ...). A state 
 `tranchi.parcels` carries a `market` column (migration 013); cross-market joins are scoped
 `AND p.market = l.market`.
 
-CURRENT STATE (2026-06-06): this is the FOUNDATION seed. It holds the verification/market config
-that `scripts/verify_listings.py` already proved out (moved here verbatim — zero behavior change).
-The remaining call-sites (`run.py`, `staleness.py`, `prefilter.py`, `db.py`,
-`playwright_source_check.py`, `enrich_*`, routers) still hold their own per-market branches; the
-next focused backend session folds those into this module (see the handoff doc's call-site map) and
-adds a market registry so audit/verify/enrich iterate all markets automatically.
+CURRENT STATE (2026-06-07): ITEM-1 call-site fold COMPLETE. Per-market values now live here and the
+shared modules read them: prefilter (`all_states`), run.py full-run skip (`full_run_skip_keys`),
+parcel writers (`market_for_scraper`/`state_for_market`), staleness (`merged_staleness_policies`),
+sources router (`merged_source_meta`), and the run.py post-passes (`probate_transfer_rule`,
+`redemption_windows`). The market registry (`MARKETS` keys / `MARKET_SCRAPERS`) is what
+audit/verify/enrich iterate.
 
-TO ADD A MARKET (today): add a `_make_<market>_market()` + a `MARKETS` entry here, then wire the
-remaining call-sites per `Clients/Marc/scraper-playbook/ADD-A-MARKET.md`. Post-refactor: just the
-config + the scrapers.
+DELIBERATE EXCEPTION — parcel canonicalization stays in `db.py::normalize_parcel_number`. It is a
+correctness-critical, FORMAT-auto-detecting function (OH 'DDD-NN-NNN' vs TN 14-char cannot be
+confused — the audited-clean basis), called from generic parse paths that don't know the market.
+Format auto-detection is more cross-market-safe than per-market dispatch here, so it is NOT folded;
+a new market's parcel format is added as a new detection branch there (the documented extension point).
+
+TO ADD A MARKET: add a `_make_<market>_market()` + a `MARKETS` entry + a `MARKET_SCRAPERS` entry
+here, write the scrapers, and (if a novel parcel format) add a branch to normalize_parcel_number.
+Full runbook: `Clients/Marc/scraper-playbook/ADD-A-MARKET.md`.
 """
 from __future__ import annotations
 
@@ -45,6 +51,20 @@ GENERAL_GUIDE = (
     "PARCEL NUMBER, not street number, and often won't appear on Zillow at all — "
     "that is expected and is not a red flag."
 )
+
+
+# ---------------------------------------------------------------- read gates
+# Always-on probate READ gates applied by routers/listings.py (the single home for the
+# gate vocabulary, out of the router). GENERAL today — both court systems use the same
+# English status words and the same join-confidence tiers. If a market's court vocabulary
+# ever diverges, graduate these to a per-market `read_gates` key + a market-scoped query.
+#
+# PROBATE_CLOSED_KEYWORDS: a probate listing whose case_status matches any of these
+#   (ILIKE '%kw%') is a settled estate — hidden from the feed (Marc's #1 rule: open only).
+# PROBATE_VISIBLE_CONFIDENCE: a probate listing is shown only when its decedent→parcel
+#   join is in this set (precision-first; 'unverified'/NULL are mis-join risks, hidden).
+PROBATE_CLOSED_KEYWORDS = ("closed", "disposed", "terminated", "dismissed")
+PROBATE_VISIBLE_CONFIDENCE = ("confirmed", "probable")
 
 
 # ---------------------------------------------------------------- URL helpers
@@ -185,6 +205,49 @@ def _make_cuyahoga_market() -> dict:
             "Cuyahoga Sheriff Sale (DLN)": "tax_delinquent_foreclosure",
             "Cuyahoga Sheriff Sales": "tax_delinquent_foreclosure",
             "Cuyahoga Land Bank": "land_bank_inventory",
+        },
+        # Per-source retirement policy (see staleness.py invariant). Keyed by the
+        # listing source_site as stored in tranchi.listings. staleness.SOURCE_STALENESS
+        # is built by merging every market's slice.
+        "staleness_policies": {
+            "Cuyahoga Sheriff Sale (DLN)": "full_rescan",
+            "Cuyahoga Land Bank": "full_rescan",
+            "Cuyahoga Forfeited Land": "full_rescan",
+            "Cuyahoga Probate Court": "cursor",
+            "Cuyahoga Sheriff Sales": "archive",
+        },
+        # Per-source public-site + role metadata for /api/v1/sources. (url, category)
+        # where category ∈ {deal, signal, registry, lead}. routers/sources._SOURCE_META
+        # is built by merging every market's slice.
+        "source_meta": {
+            "Cuyahoga Land Bank": ("https://cuyahogalandbank.org/all-available-properties/", "deal"),
+            "Cuyahoga Sheriff Sales": ("https://cpdocket.cp.cuyahogacounty.gov/sheriffsearch/search.aspx", "deal"),
+            "Cuyahoga Sheriff Sale (DLN)": ("https://www.dln.com/", "deal"),
+            "Cuyahoga Probate Court": ("https://probate.cuyahogacounty.gov/pa/", "deal"),
+            "Cuyahoga Forfeited Land": ("https://cuyahogacounty.gov/fiscal-officer/departments/real-property/forfeited-lands", "deal"),
+            "Cleveland Code Violations": ("https://data.clevelandohio.gov/", "signal"),
+            "Cuyahoga Delinquent Tax": ("https://cuyahogacounty.gov/treasury/delinquency", "signal"),
+            "Cuyahoga Fiscal Officer": ("https://myplace.cuyahogacounty.gov", "registry"),
+        },
+        # Probate "sold-after-filing" auto-transfer rule (run.py::_mark_transferred_listings).
+        # Cuyahoga case numbers encode the filing year as the first 4 chars ('2026EST...').
+        # `case_regex` identifies a probate case of this market's format; `filing_year_substr`
+        # = (start, length) for SQL substring() to pull the year. None => market has no such
+        # rule (e.g. Shelby's PR##### numbers carry no year — that gap is a tracked follow-up).
+        "probate_transfer_rule": {
+            "case_regex": r"^[0-9]{4}EST",
+            "filing_year_substr": (1, 4),
+        },
+        # OH tax deeds are FINAL at sale (no statutory owner redemption) — no window pass.
+        "redemption_windows": None,
+        # Live cross-verify endpoints (scripts/playwright_source_check.py). The single home
+        # for this market's verifier URLs so a new market declares them here, not inline in
+        # the shared verifier. The verifier FUNCTIONS + per-signal dispatch stay in that
+        # script (per-county scraping is irreducible code), but they read URLs from here.
+        "verifier_endpoints": {
+            "dln_api": "https://www.dln.com/wp-json/dln/v1/data-table",
+            "landbank_url": "https://cuyahogalandbank.org/all-available-properties/",
+            "myplace_base": "https://myplace.cuyahogacounty.gov",
         },
         "registry_link": registry_link,
         "registry_label": "Cuyahoga MyPlace — County Parcel Registry",
@@ -348,6 +411,62 @@ def _make_shelby_market() -> dict:
             "Shelby Tax Delinquent (Lead)": "tax_delinquent",
             "Shelby Eviction (Lead)": "eviction",
         },
+        # Per-source retirement policy (see staleness.py invariant). Probate is a CURSOR
+        # forward-walk (retired only by case_status re-check), the rest re-pull their full
+        # live set each run (absence = resolved).
+        "staleness_policies": {
+            "Shelby County Tax Sale": "full_rescan",
+            "Shelby County Foreclosure": "full_rescan",
+            "Shelby County Land Bank": "full_rescan",
+            "Memphis MMLBA": "full_rescan",
+            "Shelby Probate Court": "cursor",
+        },
+        # Per-source public-site + role metadata for /api/v1/sources. (url, category).
+        "source_meta": {
+            "Shelby County Tax Sale": ("https://www.shelbycountytrustee.com/191/Tax-Sale-Schedule", "deal"),
+            "Shelby County Land Bank": ("https://landbank.shelbycountytn.gov/", "deal"),
+            "Memphis MMLBA": ("https://mmlba.org/property-sales/", "deal"),
+            "Shelby County Foreclosure": ("https://www.tnforeclosurenotices.com/results/counties/shelby/", "deal"),
+            "Shelby Probate Court": ("https://prdata.shelbycountytn.gov/prweb/", "deal"),
+            "Shelby Delinquent Tax": ("https://www.shelbycountytrustee.com/259/Delinquent-Realty-Lawsuit-List", "signal"),
+            "Shelby Evictions": ("https://data.midsouth.io/", "signal"),
+            "Shelby County Parcels (ReGIS)": ("https://scgis.shelbycountytn.gov/", "registry"),
+            "Shelby Tax Delinquent (Lead)": ("https://www.shelbycountytrustee.com/259/Delinquent-Realty-Lawsuit-List", "lead"),
+            "Shelby Eviction (Lead)": ("https://data.midsouth.io/", "lead"),
+        },
+        # Shelby probate case numbers (PR#####) carry NO filing year, so there is no
+        # sold-after-filing auto-transfer rule today. NOTE: this means Shelby probate
+        # listings are not auto-transferred on sale (Rule 2 in _mark_transferred_listings
+        # still applies once sale-date enrichment covers them). Tracked follow-up:
+        # add a Shelby case parser — _FUTURE-ARCHITECTURE-HANDOFF.md.
+        "probate_transfer_rule": None,
+        # TN redeemable tax deed (TCA 67-5-2701): after the sale the original owner has a
+        # delinquency-age-driven window to redeem. Tiers evaluated top-down; first match
+        # wins. `not_null` tier = basis present but below all thresholds; `default` = basis
+        # NULL (assume the longest/safest window). Consumed by _compute_redemption_windows.
+        "redemption_windows": {
+            "signal_type": "tax_deed",
+            "basis_column": "tax_years_delinquent",
+            "tiers": [
+                {"gte": 8, "days": 90, "basis": "8yr_plus"},
+                {"gte": 5, "days": 180, "basis": "5_to_7yr"},
+                {"not_null": True, "days": 365, "basis": "le_5yr"},
+            ],
+            "default": {"days": 365, "basis": "default_assumed"},
+        },
+        # Live cross-verify endpoints (scripts/playwright_source_check.py) — see the
+        # cuyahoga note above. ePropertyPlus (land bank), Tax Sale CSV, ReGIS ArcGIS.
+        "verifier_endpoints": {
+            "epropertyplus_api": (
+                "https://public-sctn.epropertyplus.com"
+                "/landmgmtpub/remote/public/property/getPublishedProperties"
+            ),
+            "tax_sale_csv_url": "https://scgpublic.s3.amazonaws.com/TaxSaleExtract.csv",
+            "arcgis_query_url": (
+                "https://scgis.shelbycountytn.gov/serverhigh/rest/services/"
+                "Parcel/CurrentParcels/MapServer/0/query"
+            ),
+        },
         "registry_link": registry_link,
         "registry_label": "Shelby County Trustee — One-Click Parcel Page",
         "registry_search_hint": (
@@ -387,9 +506,16 @@ MARKETS: dict[str, dict] = {
 # "add a market" ergonomic: list a market's scrapers in ONE place instead of scattering
 # them across run.py / staleness.py / prefilter.py. `registry` = the parcel-spine scraper
 # (writes tranchi.parcels only, runs on its own weekly cron, skipped from the 3h full run).
+#
+# `registry_in_full_run`: whether the parcel-spine scraper runs inside the every-3h
+# full run. Cuyahoga's MyPlace sweep is light (~7K hits, enrich_detail=False) so it
+# rides the 3h run; Shelby's ReGIS sweep is 353K parcels — too heavy for 3h, so it is
+# EXCLUDED and scheduled on its own weekly cron (run explicitly via --site). This is
+# the knob behind run.py's full-run skip set (see full_run_skip_keys()).
 MARKET_SCRAPERS: dict[str, dict] = {
     "cuyahoga": {
         "registry": "fiscal_officer",
+        "registry_in_full_run": True,
         "deal_and_signal": [
             "code_violations", "land_bank", "sheriff_sales", "probate", "dln",
             "forfeited_land", "delinquent_tax",
@@ -397,6 +523,7 @@ MARKET_SCRAPERS: dict[str, dict] = {
     },
     "shelby": {
         "registry": "shelby_parcels",
+        "registry_in_full_run": False,
         "deal_and_signal": [
             "shelby_tax_sale", "shelby_foreclosure", "shelby_delinquent_tax",
             "shelby_county_landbank", "shelby_mmlba", "shelby_probate", "shelby_evictions",
@@ -413,3 +540,53 @@ def all_states() -> set[str]:
 def registry_scraper_keys() -> set[str]:
     """The parcel-spine scraper keys across all markets (run on their own weekly cron)."""
     return {m["registry"] for m in MARKET_SCRAPERS.values()}
+
+
+def merged_staleness_policies() -> dict[str, str]:
+    """Every market's {source_site: policy-string} merged into one dict.
+
+    The source of truth behind staleness.SOURCE_STALENESS. Policy strings are the
+    StalenessPolicy enum *values* ('full_rescan' | 'cursor' | 'archive') so this module
+    stays import-free of staleness.py (which imports market_config — avoids a cycle).
+    """
+    out: dict[str, str] = {}
+    for cfg in MARKETS.values():
+        out.update(cfg.get("staleness_policies", {}))
+    return out
+
+
+def merged_source_meta() -> dict[str, tuple[str | None, str]]:
+    """Every market's {source_site: (url, category)} merged — backs sources._SOURCE_META."""
+    out: dict[str, tuple[str | None, str]] = {}
+    for cfg in MARKETS.values():
+        out.update(cfg.get("source_meta", {}))
+    return out
+
+
+def full_run_skip_keys() -> set[str]:
+    """Registry spines EXCLUDED from the every-3h full run (heavy weekly-cron sweeps).
+
+    A new heavy-registry market opts out by setting `registry_in_full_run=False` in its
+    MARKET_SCRAPERS entry — no edit to run.py. Today returns {'shelby_parcels'}.
+    """
+    return {
+        m["registry"] for m in MARKET_SCRAPERS.values()
+        if not m.get("registry_in_full_run", True)
+    }
+
+
+def state_for_market(market: str) -> str:
+    """The 2-letter property_state for a market slug (e.g. 'cuyahoga' -> 'OH')."""
+    return MARKETS[market]["state"]
+
+
+def market_for_scraper(scraper_key: str) -> str | None:
+    """Reverse-lookup: which market owns this scraper key (registry or deal/signal).
+
+    The single source of truth that lets a writer/orchestrator tag its rows with the
+    right market without a per-scraper hardcode. Returns None for unknown keys.
+    """
+    for market, spec in MARKET_SCRAPERS.items():
+        if scraper_key == spec["registry"] or scraper_key in spec["deal_and_signal"]:
+            return market
+    return None

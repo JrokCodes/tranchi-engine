@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from app.database import get_db
+from app.market_config import merged_source_meta
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -21,32 +22,12 @@ logger = logging.getLogger(__name__)
 _ONLINE_THRESHOLD_SECONDS = 4 * 3600
 
 # Per-source metadata: the real public site each scraper pulls from, and the
-# source's role. "deal" sources create listings; "signal" sources tag parcels
-# with distress signals; "registry" is the parcel identity/enrichment spine.
-_SOURCE_META: dict[str, tuple[str | None, str]] = {
-    "Cuyahoga Land Bank": ("https://cuyahogalandbank.org/all-available-properties/", "deal"),
-    "Cuyahoga Sheriff Sales": ("https://cpdocket.cp.cuyahogacounty.gov/sheriffsearch/search.aspx", "deal"),
-    "Cuyahoga Sheriff Sale (DLN)": ("https://www.dln.com/", "deal"),
-    "Cuyahoga Probate Court": ("https://probate.cuyahogacounty.gov/pa/", "deal"),
-    "Cuyahoga Forfeited Land": ("https://cuyahogacounty.gov/fiscal-officer/departments/real-property/forfeited-lands", "deal"),
-    "Cleveland Code Violations": ("https://data.clevelandohio.gov/", "signal"),
-    "Cuyahoga Delinquent Tax": ("https://cuyahogacounty.gov/treasury/delinquency", "signal"),
-    "Cuyahoga Fiscal Officer": ("https://myplace.cuyahogacounty.gov", "registry"),
-    # Shelby County, TN (Memphis) — first market outside Ohio.
-    "Shelby County Tax Sale": ("https://www.shelbycountytrustee.com/191/Tax-Sale-Schedule", "deal"),
-    "Shelby County Land Bank": ("https://landbank.shelbycountytn.gov/", "deal"),
-    "Memphis MMLBA": ("https://mmlba.org/property-sales/", "deal"),
-    "Shelby County Foreclosure": ("https://www.tnforeclosurenotices.com/results/counties/shelby/", "deal"),
-    "Shelby Probate Court": ("https://prdata.shelbycountytn.gov/prweb/", "deal"),
-    "Shelby Delinquent Tax": ("https://www.shelbycountytrustee.com/259/Delinquent-Realty-Lawsuit-List", "signal"),
-    "Shelby Evictions": ("https://data.midsouth.io/", "signal"),
-    "Shelby County Parcels (ReGIS)": ("https://scgis.shelbycountytn.gov/", "registry"),
-    # Pre-distress LEADS: signal parcels surfaced as distress_stage='distress_signal'
-    # listings (migration 012). category "lead" so the UI groups them under Pre-Distress,
-    # distinct from the raw "signal" sources above that feed them.
-    "Shelby Tax Delinquent (Lead)": ("https://www.shelbycountytrustee.com/259/Delinquent-Realty-Lawsuit-List", "lead"),
-    "Shelby Eviction (Lead)": ("https://data.midsouth.io/", "lead"),
-}
+# source's role. "deal" sources create listings; "signal" sources tag parcels with
+# distress signals; "registry" is the parcel identity/enrichment spine; "lead" are
+# pre-distress signals surfaced as listings (migration 012). The per-source (url,
+# category) lives in each market's config (market_config.py "source_meta"); this is
+# the merge across all markets, so adding a market is a config edit, not an edit here.
+_SOURCE_META: dict[str, tuple[str | None, str]] = merged_source_meta()
 
 
 class SourceCard(BaseModel):

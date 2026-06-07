@@ -42,6 +42,7 @@ if _env.exists():
 
 import asyncpg  # noqa: E402
 
+from app.market_config import MARKETS, state_for_market  # noqa: E402
 from app.scrapers.fiscal_officer import _enrich_sale_data_playwright  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -54,6 +55,7 @@ async def _pick_targets(
     signal: str | None,
     all_probate_now: bool,
     limit: int,
+    property_state: str,
 ) -> list[str]:
     if all_probate_now:
         rows = await conn.fetch(
@@ -62,21 +64,23 @@ async def _pick_targets(
             FROM tranchi.listings l
             JOIN tranchi.parcels p ON p.parcel_number = l.source_listing_id
             WHERE l.status = 'active' AND l.signal_type = 'probate'
-              -- CROSS-COUNTY GUARD: sale enrichment is Cuyahoga MyPlace (Playwright).
-              -- TN parcels would only miss or risk corruption — scope to OH.
-              AND l.property_state = 'OH'
+              -- CROSS-MARKET GUARD: sale enrichment is Cuyahoga MyPlace (Playwright).
+              -- Other markets would only miss or risk corruption — scope by the
+              -- market's property_state (from market config), not a hardcoded 'OH'.
+              AND l.property_state = $1
               AND l.source_listing_id IS NOT NULL
               AND p.last_sale_date IS NULL
             ORDER BY l.first_seen_at DESC
-            """
+            """,
+            property_state,
         )
         return [r["parcel"] for r in rows]
 
-    # CROSS-COUNTY GUARD: sale enrichment is Cuyahoga MyPlace — scope to OH (see above).
-    where = "l.status = 'active' AND l.property_state = 'OH' AND l.source_listing_id IS NOT NULL AND p.last_sale_date IS NULL"
-    params: list = []
+    # CROSS-MARKET GUARD: sale enrichment is Cuyahoga MyPlace — scope by market state (see above).
+    where = "l.status = 'active' AND l.property_state = $1 AND l.source_listing_id IS NOT NULL AND p.last_sale_date IS NULL"
+    params: list = [property_state]
     if signal:
-        where += " AND l.signal_type = $1"
+        where += " AND l.signal_type = $2"
         params.append(signal)
     rows = await conn.fetch(
         f"""
@@ -149,6 +153,7 @@ async def run(args) -> int:
                 signal=args.signal,
                 all_probate_now=args.all_probate_now,
                 limit=args.limit,
+                property_state=state_for_market(args.market),
             )
         logger.info("Targets: %d parcels", len(targets))
         if args.dry_run:
@@ -201,6 +206,11 @@ def main() -> int:
     ap.add_argument("--parcels", nargs="*", default=None, help="Ad-hoc parcel list")
     ap.add_argument("--concurrency", type=int, default=3, help="Max in-flight Playwright sessions")
     ap.add_argument("--dry-run", action="store_true", help="Print targets, no writes")
+    ap.add_argument(
+        "--market", type=str, default="cuyahoga", choices=list(MARKETS.keys()),
+        help="Market to enrich (default cuyahoga). Sale enrichment source is MyPlace "
+             "(Cuyahoga); only markets with a MyPlace-style transfers source apply.",
+    )
     args = ap.parse_args()
     return asyncio.run(run(args))
 

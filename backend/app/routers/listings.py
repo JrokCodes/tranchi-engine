@@ -27,6 +27,7 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 from app.database import get_db
+from app.market_config import PROBATE_CLOSED_KEYWORDS, PROBATE_VISIBLE_CONFIDENCE
 from app.services.streetview import build_street_view_url
 from app.verify_links import build_verify_links
 from app.routers.sources import _SOURCE_META
@@ -358,11 +359,11 @@ _BASE_SELECT = """
         ) z
         GROUP BY parcel_number
     ) sig ON sig.parcel_number = l.source_listing_id
-    -- Parcel join market-scoped: a listing only enriches from a parcel in its own market
-    -- (structurally prevents cross-market joins; 0 mismatches today). Upgrade to p.market
-    -- when a same-state second county exists.
+    -- Parcel join market-scoped on the county-level `market` (migration 014): a listing
+    -- only enriches from a parcel in its own market, so a same-state second county whose
+    -- per-county parcel numbers could collide can never cross-enrich (the #10 guarantee).
     LEFT JOIN tranchi.parcels p
-      ON p.parcel_number = l.source_listing_id AND p.property_state = l.property_state
+      ON p.parcel_number = l.source_listing_id AND p.market = l.market
 """
 
 
@@ -450,11 +451,13 @@ def _build_where(
     # listing whose court case_status reads closed/disposed/terminated/dismissed is
     # no longer a live lead — the estate is settled and the property has transferred.
     # NULL case_status (not yet re-checked) stays visible until the backfill populates
-    # it. Non-probate listings are unaffected.
+    # it. Non-probate listings are unaffected. Keyword vocab: market_config.
+    _closed_kw = " OR ".join(
+        f"l.case_status ILIKE '%{kw}%'" for kw in PROBATE_CLOSED_KEYWORDS
+    )
     conditions.append(
         "NOT (l.signal_type = 'probate' AND l.case_status IS NOT NULL AND ("
-        "l.case_status ILIKE '%closed%' OR l.case_status ILIKE '%disposed%' "
-        "OR l.case_status ILIKE '%terminated%' OR l.case_status ILIKE '%dismissed%'))"
+        f"{_closed_kw}))"
     )
 
     # Always-on dedup gate. Cross-source dedup (run.py) marks the non-canonical copy of
@@ -474,9 +477,10 @@ def _build_where(
     # filters". Rows are re-tiered by the precision matcher + scripts/reresolve_probate.py.
     # include_unverified=true = debug escape (still subject to the open-cases gate above).
     if not include_unverified:
+        _conf = ", ".join(f"'{c}'" for c in PROBATE_VISIBLE_CONFIDENCE)
         conditions.append(
             "(l.signal_type IS DISTINCT FROM 'probate' "
-            "OR l.match_confidence IN ('confirmed', 'probable'))"
+            f"OR l.match_confidence IN ({_conf}))"
         )
 
     return conditions, params, idx

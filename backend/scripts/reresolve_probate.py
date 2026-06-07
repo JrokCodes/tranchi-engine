@@ -111,7 +111,11 @@ async def _pick_listings(conn: asyncpg.Connection, *, limit: int | None) -> list
                p.owner_name,
                COUNT(*) OVER (PARTITION BY l.case_number) AS case_count
         FROM tranchi.listings l
-        LEFT JOIN tranchi.parcels p ON p.parcel_number = l.source_listing_id
+        -- Market-scoped (migration 014): the owner_name pulled for confidence re-tiering
+        -- must come from a parcel in the listing's OWN market. A market-blind parcel_number
+        -- join here is the exact class of the June-2026 cross-market owner-name leak.
+        LEFT JOIN tranchi.parcels p
+          ON p.parcel_number = l.source_listing_id AND p.market = l.market
         WHERE l.signal_type = 'probate' AND l.status = 'active'
         ORDER BY l.case_number, l.first_seen_at
         {f'LIMIT {int(limit)}' if limit else ''}

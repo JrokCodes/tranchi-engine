@@ -52,6 +52,9 @@ logger = logging.getLogger("scrapers.run")
 
 import asyncpg  # noqa: E402 — after path setup
 
+from app.market_config import (  # noqa: E402
+    MARKETS, market_for_scraper, full_run_skip_keys,
+)
 from app.scrapers.base import SignalScraper  # noqa: E402
 from app.scrapers.code_violations import (  # noqa: E402
     CodeViolationsScraper,
@@ -231,7 +234,9 @@ async def _run_scraper(
             result.passed = len(hits)   # registry: every hit is passed through
             logger.info("%s: fetched %d parcels from registry sweep", site_name, result.found)
 
-            upsert_counts = await _fo_upsert_parcels(pool, hits, dry_run=dry_run)
+            upsert_counts = await _fo_upsert_parcels(
+                pool, hits, dry_run=dry_run, market=market_for_scraper(scraper_key)
+            )
             result.new_inserted = upsert_counts.get("inserted", 0)
             result.updated = upsert_counts.get("updated", 0)
             result.errors = upsert_counts.get("errors", 0)
@@ -279,7 +284,9 @@ async def _run_scraper(
             result.passed = len(raw_signals)   # signals are not prefiltered
             logger.info("%s: fetched %d signals", site_name, result.found)
 
-            upsert_result = await _cv_upsert_signals(pool, raw_signals, dry_run=dry_run)
+            upsert_result = await _cv_upsert_signals(
+                pool, raw_signals, market=market_for_scraper(scraper_key), dry_run=dry_run
+            )
             result.new_inserted = upsert_result.get("inserted", 0)
             result.updated = upsert_result.get("updated", 0)
             result.errors = upsert_result.get("errors", 0)
@@ -353,6 +360,7 @@ async def _run_scraper(
                 pool,
                 filtered_listings,
                 site_name,
+                market=market_for_scraper(scraper_key),
                 found_raw=result.found,
                 filtered_count=filtered_out,
                 dry_run=dry_run,
@@ -535,9 +543,11 @@ async def _ensure_parcels_for_listings(pool: asyncpg.Pool) -> int:
             result = await conn.execute(
                 """
                 INSERT INTO tranchi.parcels
-                    (parcel_number, situs_address, first_seen_at, last_seen_at, source_url)
+                    (parcel_number, situs_address, market, property_state,
+                     first_seen_at, last_seen_at, source_url)
                 SELECT DISTINCT ON (l.source_listing_id)
-                       l.source_listing_id, l.property_address, now(), now(), 'stub:listing'
+                       l.source_listing_id, l.property_address, l.market, l.property_state,
+                       now(), now(), 'stub:listing'
                 FROM tranchi.listings l
                 LEFT JOIN tranchi.parcels p ON p.parcel_number = l.source_listing_id
                 WHERE l.source_listing_id IS NOT NULL AND l.source_listing_id <> ''
@@ -609,23 +619,14 @@ async def _mark_transferred_listings(pool: asyncpg.Pool) -> int:
     try:
         async with pool.acquire() as conn:
             result = await conn.execute(
-                """
+                f"""
                 UPDATE tranchi.listings AS l
                 SET status = 'transferred'
                 FROM tranchi.parcels AS p
                 WHERE l.source_listing_id = p.parcel_number
                   AND l.status = 'active'
                   AND p.last_sale_date IS NOT NULL
-                  AND (
-                    -- (1) probate: sold at/after the case was filed
-                    (l.signal_type = 'probate'
-                       AND l.case_number ~ '^[0-9]{4}EST'
-                       AND p.last_sale_date >= make_date(
-                           CAST(substring(l.case_number FROM 1 FOR 4) AS INTEGER), 1, 1))
-                    OR
-                    -- (2) any source: parcel changed hands after we first listed it
-                    (p.last_sale_date > l.first_seen_at::date)
-                  )
+                  AND ({_transfer_predicate()})
                 """
             )
             count = int(result.split()[-1]) if result else 0
@@ -637,6 +638,32 @@ async def _mark_transferred_listings(pool: asyncpg.Pool) -> int:
     except Exception as exc:
         logger.warning("Transferred detection failed: %s", exc)
         return 0
+
+
+def _transfer_predicate() -> str:
+    """Build the OR-predicate for _mark_transferred_listings from market config.
+
+    Rule (1) PROBATE (per market that declares `probate_transfer_rule`): a probate listing
+    whose parcel sold at/after the case filing year. The regex + filing-year substring come
+    from each market's config (Cuyahoga '2026EST...' => year is chars 1..4; Shelby declares
+    None so it contributes no clause — the tracked auto-transfer gap). Rule (2) ANY-SOURCE
+    (market-agnostic): parcel changed hands after we first listed it.
+    """
+    clauses: list[str] = []
+    for cfg in MARKETS.values():
+        rule = cfg.get("probate_transfer_rule")
+        if not rule:
+            continue
+        start, length = rule["filing_year_substr"]
+        clauses.append(
+            "(l.signal_type = 'probate' "
+            f"AND l.case_number ~ '{rule['case_regex']}' "
+            "AND p.last_sale_date >= make_date("
+            f"CAST(substring(l.case_number FROM {int(start)} FOR {int(length)}) AS INTEGER), 1, 1))"
+        )
+    # (2) any source: parcel changed hands after we first listed it.
+    clauses.append("(p.last_sale_date > l.first_seen_at::date)")
+    return " OR ".join(clauses)
 
 
 async def _flag_incomplete_addresses(pool: asyncpg.Pool) -> int:
@@ -706,49 +733,77 @@ async def _compute_redemption_windows(pool: asyncpg.Pool) -> int:
     alone. Does NOT change listings.status (stays 'active' = visible while pending);
     _finalize_expired_redemptions flips elapsed windows to 'final'.
     """
+    total = 0
     try:
         async with pool.acquire() as conn:
-            result = await conn.execute(
-                """
-                UPDATE tranchi.listings AS l
-                SET redemption_window_days = w.window_days,
-                    redemption_basis       = w.basis,
-                    redemption_ends        = l.confirmation_order_date
-                                             + (w.window_days || ' days')::interval,
-                    redemption_status      = 'pending',
-                    redemption_checked_at  = now()
-                FROM (
-                    SELECT l2.id,
-                           CASE
-                               WHEN p.tax_years_delinquent >= 8 THEN 90
-                               WHEN p.tax_years_delinquent >= 5 THEN 180
-                               WHEN p.tax_years_delinquent IS NOT NULL THEN 365
-                               ELSE 365
-                           END AS window_days,
-                           CASE
-                               WHEN p.tax_years_delinquent >= 8 THEN '8yr_plus'
-                               WHEN p.tax_years_delinquent >= 5 THEN '5_to_7yr'
-                               WHEN p.tax_years_delinquent IS NOT NULL THEN 'le_5yr'
-                               ELSE 'default_assumed'
-                           END AS basis
-                    FROM tranchi.listings l2
-                    LEFT JOIN tranchi.parcels p
-                           ON p.parcel_number = l2.source_listing_id
-                    WHERE l2.signal_type = 'tax_deed'
-                      AND l2.confirmation_order_date IS NOT NULL
-                      AND (l2.redemption_status IS NULL
-                           OR l2.redemption_status = 'pending')
-                ) AS w
-                WHERE l.id = w.id
-                """
-            )
-            count = int(result.split()[-1]) if result else 0
-            if count > 0:
-                logger.info("Redemption windows: computed/refreshed %d tax-deed rows", count)
-            return count
+            # One UPDATE per market that defines a redemption policy (TN today; OH has
+            # none — final at sale). Scoped to the market's listings so per-market window
+            # tiers never bleed across markets. property_state is the scope today; it
+            # upgrades to the market column in the #10 cutover.
+            for market, cfg in MARKETS.items():
+                rw = cfg.get("redemption_windows")
+                if not rw:
+                    continue
+                days_case, basis_case = _redemption_case_sql(rw)
+                result = await conn.execute(
+                    f"""
+                    UPDATE tranchi.listings AS l
+                    SET redemption_window_days = w.window_days,
+                        redemption_basis       = w.basis,
+                        redemption_ends        = l.confirmation_order_date
+                                                 + (w.window_days || ' days')::interval,
+                        redemption_status      = 'pending',
+                        redemption_checked_at  = now()
+                    FROM (
+                        SELECT l2.id,
+                               {days_case} AS window_days,
+                               {basis_case} AS basis
+                        FROM tranchi.listings l2
+                        LEFT JOIN tranchi.parcels p
+                               ON p.parcel_number = l2.source_listing_id
+                                  AND p.market = l2.market
+                        WHERE l2.signal_type = $1
+                          AND l2.market = $2
+                          AND l2.confirmation_order_date IS NOT NULL
+                          AND (l2.redemption_status IS NULL
+                               OR l2.redemption_status = 'pending')
+                    ) AS w
+                    WHERE l.id = w.id
+                    """,
+                    rw["signal_type"],
+                    market,
+                )
+                total += int(result.split()[-1]) if result else 0
+            if total > 0:
+                logger.info("Redemption windows: computed/refreshed %d tax-deed rows", total)
+            return total
     except Exception as exc:
         logger.warning("Redemption-window computation failed: %s", exc)
         return 0
+
+
+def _redemption_case_sql(rw: dict) -> tuple[str, str]:
+    """Build (window_days_case, basis_case) SQL from a market's redemption_windows config.
+
+    Tiers are evaluated top-down (first match wins): `gte` => '<col> >= N', `not_null` =>
+    '<col> IS NOT NULL'. Reproduces the TCA-67-5-2701 CASE exactly from data.
+    """
+    col = rw["basis_column"]
+    days_whens: list[str] = []
+    basis_whens: list[str] = []
+    for tier in rw["tiers"]:
+        if "gte" in tier:
+            cond = f"p.{col} >= {int(tier['gte'])}"
+        elif tier.get("not_null"):
+            cond = f"p.{col} IS NOT NULL"
+        else:
+            raise ValueError(f"redemption tier needs 'gte' or 'not_null': {tier}")
+        days_whens.append(f"WHEN {cond} THEN {int(tier['days'])}")
+        basis_whens.append(f"WHEN {cond} THEN '{tier['basis']}'")
+    dflt = rw["default"]
+    days_case = "CASE " + " ".join(days_whens) + f" ELSE {int(dflt['days'])} END"
+    basis_case = "CASE " + " ".join(basis_whens) + f" ELSE '{dflt['basis']}' END"
+    return days_case, basis_case
 
 
 async def _finalize_expired_redemptions(pool: asyncpg.Pool) -> int:
@@ -838,7 +893,9 @@ async def main() -> int:
             # ReGIS sweep every 3h is wasteful and not "laying low". Listings still
             # refresh every 3h; _ensure_parcels_for_listings backfills stubs between
             # weekly spine sweeps so coverage stays 100%. Run explicitly via --site.
-            _FULL_RUN_SKIP = {"shelby_parcels"}
+            # The skip set is derived from market_config (registry_in_full_run flag), so
+            # a new heavy-registry market opts out in config, not here.
+            _FULL_RUN_SKIP = full_run_skip_keys()
             scraper_keys = [k for k in _SCRAPERS.keys() if k not in _FULL_RUN_SKIP]
 
         if args.dry_run:

@@ -404,7 +404,7 @@ class DLNScraper(ListingScraper):
         # 3) cache MyPlace hits back into the registry (skip on dry-run)
         if self.pool is not None and newly and not self.dry_run:
             try:
-                await fo.upsert_parcels(self.pool, newly)
+                await fo.upsert_parcels(self.pool, newly, market="cuyahoga")
             except Exception as exc:
                 logger.warning("DLN: caching %d resolved parcels failed: %s", len(newly), exc)
 

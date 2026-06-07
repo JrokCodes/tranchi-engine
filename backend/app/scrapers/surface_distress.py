@@ -109,7 +109,7 @@ async def surface_distress_leads(pool: asyncpg.Pool, *, dry_run: bool = False) -
                 INSERT INTO tranchi.listings
                     (source_site, signal_type, distress_stage, status,
                      property_address, property_city, property_zip, property_state, property_county,
-                     source_listing_id, trustee_name, first_seen_at, last_seen_at)
+                     source_listing_id, trustee_name, market, first_seen_at, last_seen_at)
                 SELECT DISTINCT ON (s.parcel_number)
                     $1, $3, 'distress_signal', 'active',
                     COALESCE(NULLIF(p.situs_address,''), s.payload->>'property_location'),
@@ -120,9 +120,11 @@ async def surface_distress_leads(pool: asyncpg.Pool, *, dry_run: bool = False) -
                     'TN', 'Shelby',
                     s.parcel_number,
                     COALESCE(p.owner_name, s.payload->>'owner'),
+                    'shelby',
                     now(), now()
                 FROM tranchi.signals s
-                LEFT JOIN tranchi.parcels p ON p.parcel_number = s.parcel_number
+                LEFT JOIN tranchi.parcels p
+                  ON p.parcel_number = s.parcel_number AND p.market = s.market
                 WHERE s.source=$2 AND s.signal_type=$3
                   AND s.last_seen_at >= {_FRESH}
                   AND COALESCE(NULLIF(p.situs_address,''), s.payload->>'property_location') IS NOT NULL
@@ -147,7 +149,8 @@ async def surface_distress_leads(pool: asyncpg.Pool, *, dry_run: bool = False) -
                     SELECT count(*) FROM (
                         SELECT DISTINCT s.parcel_number
                         FROM tranchi.signals s
-                        LEFT JOIN tranchi.parcels p ON p.parcel_number=s.parcel_number
+                        LEFT JOIN tranchi.parcels p
+                          ON p.parcel_number=s.parcel_number AND p.market = s.market
                         WHERE s.source=$2 AND s.signal_type=$3
                           AND s.last_seen_at >= {_FRESH}
                           AND COALESCE(NULLIF(p.situs_address,''), s.payload->>'property_location') IS NOT NULL

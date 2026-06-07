@@ -75,6 +75,7 @@ from typing import Any
 import httpx
 from bs4 import BeautifulSoup
 
+from app.market_config import state_for_market
 from app.scrapers.base import ListingScraper
 from app.scrapers.models import RawListing
 from app.scrapers.user_agents import random_ua
@@ -976,6 +977,8 @@ async def upsert_parcels(
     pool: Any,  # asyncpg.Pool
     hits: list[dict[str, Any]],
     dry_run: bool = False,
+    *,
+    market: str,
 ) -> dict[str, int]:
     """
     Upsert a list of parcel hit dicts into tranchi.parcels.
@@ -983,12 +986,18 @@ async def upsert_parcels(
     Called by run.py immediately after fetch_and_parse(). The hits list is
     the raw dicts returned by _parse_hit_list (before conversion to RawListing).
 
+    `market` is the market slug these parcels belong to (the caller always knows it
+    statically — fiscal_officer/dln/probate => 'cuyahoga', shelby_parcels => 'shelby').
+    It tags every row with market + property_state so cross-market parcel joins stay
+    scoped (ITEM-1). Required keyword arg: a parcel must never land market=NULL.
+
     Returns counts: {"inserted": N, "updated": N, "errors": N}
     """
     if dry_run:
         logger.info("[DRY RUN] Would upsert %d parcels to tranchi.parcels", len(hits))
         return {"inserted": 0, "updated": 0, "errors": 0}
 
+    property_state = state_for_market(market)
     counts = {"inserted": 0, "updated": 0, "errors": 0}
     now = datetime.now(tz=timezone.utc)
 
@@ -1018,7 +1027,9 @@ async def upsert_parcels(
                             delinquent_flag      = COALESCE($10, delinquent_flag),
                             last_seen_at         = $11,
                             source_url           = $12,
-                            native_parcel_id     = COALESCE($13, native_parcel_id)
+                            native_parcel_id     = COALESCE($13, native_parcel_id),
+                            market               = $14,
+                            property_state       = $15
                         WHERE parcel_number = $1
                         """,
                         hit["parcel_number"],
@@ -1034,6 +1045,8 @@ async def upsert_parcels(
                         now,
                         hit.get("source_url"),
                         native_parcel_id,
+                        market,
+                        property_state,
                     )
                     counts["updated"] += 1
                 else:
@@ -1045,14 +1058,14 @@ async def upsert_parcels(
                             school_district, current_market_value,
                             current_tax_balance, delinquent_flag,
                             first_seen_at, last_seen_at, source_url,
-                            native_parcel_id
+                            native_parcel_id, market, property_state
                         ) VALUES (
                             $1, $2, $3,
                             $4, $5, $6,
                             $7, $8,
                             $9, $10,
                             $11, $11, $12,
-                            $13
+                            $13, $14, $15
                         )
                         ON CONFLICT (parcel_number) DO NOTHING
                         """,
@@ -1069,6 +1082,8 @@ async def upsert_parcels(
                         now,
                         hit.get("source_url"),
                         native_parcel_id,
+                        market,
+                        property_state,
                     )
                     counts["inserted"] += 1
             except Exception as exc:
@@ -1384,8 +1399,8 @@ async def upsert_signals_from_parcels(
                         """
                         INSERT INTO tranchi.signals
                             (parcel_number, signal_type, source, observed_at,
-                             confidence, payload, first_seen_at, last_seen_at)
-                        VALUES ($1, $2, 'fiscal_officer', $3, $4, $5::jsonb, $3, $3)
+                             confidence, payload, first_seen_at, last_seen_at, market)
+                        VALUES ($1, $2, 'fiscal_officer', $3, $4, $5::jsonb, $3, $3, 'cuyahoga')
                         ON CONFLICT DO NOTHING
                         """,
                         pn,

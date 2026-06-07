@@ -351,6 +351,7 @@ async def upsert_listings(
     listings: list[RawListing],
     source_site: str,
     *,
+    market: str,
     found_raw: int | None = None,
     filtered_count: int = 0,
     dry_run: bool = False,
@@ -403,7 +404,7 @@ async def upsert_listings(
         # Upsert each listing
         for listing in listings:
             try:
-                listing_id, is_new = await _upsert_one(conn, listing)
+                listing_id, is_new = await _upsert_one(conn, listing, market)
                 if is_new:
                     result.new_inserted += 1
                     result.new_today += 1
@@ -477,6 +478,7 @@ async def upsert_listings(
 async def _upsert_one(
     conn: asyncpg.Connection,
     listing: RawListing,
+    market: str,
 ) -> tuple[UUID, bool]:
     """Insert or update a single listing row.
 
@@ -581,7 +583,8 @@ async def _upsert_one(
                 decedent_name       = COALESCE($21, decedent_name),
                 case_title          = COALESCE($22, case_title),
                 decedent_dod        = COALESCE($23, decedent_dod),
-                probate_internal_id = COALESCE($24, probate_internal_id)
+                probate_internal_id = COALESCE($24, probate_internal_id),
+                market              = $25
             WHERE id = $15
             """,
             listing.deposit_usd,
@@ -608,6 +611,7 @@ async def _upsert_one(
             listing.case_title,
             listing.decedent_dod,
             listing.probate_internal_id,
+            market,
         )
         return existing_id, False
 
@@ -621,7 +625,7 @@ async def _upsert_one(
             signal_type, source_listing_id,
             auction_status, opening_bid_usd, appraised_value_usd, sec_sale_date,
             case_status, case_status_date, match_method, match_confidence, match_score,
-            decedent_name, case_title, decedent_dod, probate_internal_id
+            decedent_name, case_title, decedent_dod, probate_internal_id, market
         ) VALUES (
             $1,  $2,  $3,
             $4,  $5,  $6,
@@ -630,7 +634,7 @@ async def _upsert_one(
             $15, $16,
             $17, $18, $19, $20,
             $21, $22, $23, $24, $25,
-            $26, $27, $28, $29
+            $26, $27, $28, $29, $30
         )
         RETURNING id
         """,
@@ -663,6 +667,7 @@ async def _upsert_one(
         listing.case_title,
         listing.decedent_dod,
         listing.probate_internal_id,
+        market,
     )
     return new_id, True
 

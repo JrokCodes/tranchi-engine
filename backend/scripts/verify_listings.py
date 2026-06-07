@@ -82,14 +82,14 @@ _SELECT_COLS = """
     CURRENT_DATE AS today
 """
 
-# Parcel join is market-scoped (p.property_state = l.property_state) so a listing can
-# only enrich from a parcel in its OWN market — structurally prevents the cross-market
-# join bug class even though parcel-number formats don't currently collide. (Upgrade the
-# guard to p.market once a same-state second county exists.)
+# Parcel join is market-scoped on the county-level `market` (migration 014) so a listing
+# can only enrich from a parcel in its OWN market — structurally prevents the cross-market
+# join bug class even for a same-state second county whose per-county parcel numbers could
+# collide (the #10 guarantee; formats don't collide across the OH/TN markets today).
 _FROM_JOIN = """
     FROM tranchi.listings l
     LEFT JOIN tranchi.parcels p
-      ON p.parcel_number = l.source_listing_id AND p.property_state = l.property_state
+      ON p.parcel_number = l.source_listing_id AND p.market = l.market
 """
 
 
