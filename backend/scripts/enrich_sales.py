@@ -54,9 +54,36 @@ async def _pick_targets(
     *,
     signal: str | None,
     all_probate_now: bool,
+    all_spine: bool,
     limit: int,
+    market: str,
     property_state: str,
 ) -> list[str]:
+    if all_spine:
+        # FULL REGISTRY SPINE: every parcel in this market still missing last_sale_date —
+        # NOT gated on listing membership (the pre-distress lead parcels live in
+        # tranchi.signals, not tranchi.listings yet). Order signal-bearing parcels
+        # (pre-distress lead candidates: tax_delinquent / code_violation) FIRST so the
+        # off-market 'recently sold' filter activates on the lead set before the long tail.
+        # last_sale_date is the durable off-market guard (see _mark_transferred_listings).
+        # limit<=0 => unbounded (the full one-time backfill).
+        lim = "" if limit <= 0 else f"LIMIT {int(limit)}"
+        rows = await conn.fetch(
+            f"""
+            SELECT p.parcel_number AS parcel
+            FROM tranchi.parcels p
+            WHERE p.market = $1 AND p.last_sale_date IS NULL
+            ORDER BY (EXISTS (
+                       SELECT 1 FROM tranchi.signals s
+                       WHERE s.parcel_number = p.parcel_number AND s.market = $1
+                         AND s.signal_type IN ('tax_delinquent', 'code_violation'))) DESC,
+                     p.parcel_number
+            {lim}
+            """,
+            market,
+        )
+        return [r["parcel"] for r in rows]
+
     if all_probate_now:
         rows = await conn.fetch(
             """
@@ -152,7 +179,9 @@ async def run(args) -> int:
                 read_conn,
                 signal=args.signal,
                 all_probate_now=args.all_probate_now,
+                all_spine=args.all_spine,
                 limit=args.limit,
+                market=args.market,
                 property_state=state_for_market(args.market),
             )
         logger.info("Targets: %d parcels", len(targets))
@@ -203,6 +232,9 @@ def main() -> int:
                     help="probate | tax_delinquent_foreclosure | mortgage_foreclosure | land_bank_inventory")
     ap.add_argument("--all-probate-now", action="store_true",
                     help="Backfill ALL active probate parcels missing last_sale_date (no limit)")
+    ap.add_argument("--all-spine", action="store_true",
+                    help="Backfill the FULL parcel spine for --market (all parcels missing "
+                         "last_sale_date, lead-candidate parcels first). Use --limit 0 for unbounded.")
     ap.add_argument("--parcels", nargs="*", default=None, help="Ad-hoc parcel list")
     ap.add_argument("--concurrency", type=int, default=3, help="Max in-flight Playwright sessions")
     ap.add_argument("--dry-run", action="store_true", help="Print targets, no writes")

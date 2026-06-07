@@ -699,6 +699,15 @@ async def verify_one(row: dict, client: httpx.AsyncClient) -> dict:
             src_result = await verify_dln(client, row)
         elif sig == "land_bank_inventory":
             src_result = await verify_oh_landbank(client, row)
+        elif sig == "tax_delinquent":
+            # Pre-distress LEAD (distress_stage='distress_signal'). Like the TN leads, there is no
+            # clean per-row live web source to re-fetch the Fiscal Officer delinquent-tax list;
+            # surface_distress refreshes a lead's last_seen_at ONLY while its backing signal is fresh,
+            # so a fresh listing ⟹ the signal is still present. The MyPlace cross-cut below confirms
+            # the parcel owner hasn't changed (not sold). Freshness + registry = the lead-verify
+            # approach (verify_tn_freshness_fallback is market-agnostic — checks last_seen only).
+            src_result = await verify_tn_freshness_fallback(
+                row, "Cuyahoga Tax Delinquent lead (Fiscal Officer delinquent-tax list)")
         else:
             # OH forfeited_land and any unknown OH signal — preserve existing ERROR behavior
             src_result = {"verdict": "ERROR", "evidence": f"no OH verifier for signal_type={sig}"}

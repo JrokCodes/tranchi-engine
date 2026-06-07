@@ -69,22 +69,30 @@ async def _cursor(pool: asyncpg.Pool) -> int:
     return int(val)
 
 
-async def _update_case_status(pool: asyncpg.Pool, case_id: str, case_status: str, dry_run: bool) -> int:
+async def _update_case_status(
+    pool: asyncpg.Pool, case_id: str, case_status: str, dry_run: bool,
+    filing_date=None,
+) -> int:
+    # filing_date is COALESCE-set (never clobbers an existing value) so this re-check also
+    # BACKFILLS the column onto existing Shelby probate rows ingested before migration 015 —
+    # the cursor-walk scraper never revisits them, so this is the only path that populates
+    # filing_date for the back-catalog, which the filing_date auto-transfer rule depends on.
     if dry_run:
         return 0
     if _is_closed(case_status):
         result = await pool.execute(
             """
             UPDATE tranchi.listings
-            SET case_status = $2, status = 'expired'
+            SET case_status = $2, status = 'expired', filing_date = COALESCE($4, filing_date)
             WHERE source_site = $3 AND case_number = $1 AND status IN ('active', 'not_listed')
             """,
-            case_id, case_status, SITE_NAME,
+            case_id, case_status, SITE_NAME, filing_date,
         )
     else:
         result = await pool.execute(
-            "UPDATE tranchi.listings SET case_status = $2 WHERE source_site = $3 AND case_number = $1",
-            case_id, case_status, SITE_NAME,
+            "UPDATE tranchi.listings SET case_status = $2, filing_date = COALESCE($4, filing_date) "
+            "WHERE source_site = $3 AND case_number = $1",
+            case_id, case_status, SITE_NAME, filing_date,
         )
     return int(result.split()[-1]) if result else 0
 
@@ -150,7 +158,10 @@ async def recheck(start_id: int, end_id: int, dry_run: bool = False) -> None:
                     if not case_status:
                         continue
                     seen += 1
-                    n_rows = await _update_case_status(pool, case_id, case_status, dry_run)
+                    n_rows = await _update_case_status(
+                        pool, case_id, case_status, dry_run,
+                        filing_date=parsed.get("filing_date"),
+                    )
                     updated += n_rows
                     if _is_closed(case_status):
                         closed += 1

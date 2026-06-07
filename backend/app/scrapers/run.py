@@ -142,8 +142,14 @@ async def _run_scraper(
     scraper_key: str,
     pool: asyncpg.Pool,
     dry_run: bool,
+    full: bool = False,
 ) -> ScrapeResult:
     """Run a single scraper. Routes to registry, signal, or listing path.
+
+    full=True forces a FULL pull for delta-pull scrapers (last_run_date=None) instead of
+    the incremental window — used by the code_violations status-refresh cron so existing
+    signals' live status + last_seen_at are re-pulled (a delta pull only catches NEW
+    filings, leaving old violations' Open/Closed status + freshness frozen).
 
     fiscal_officer (registry path): calls fetch_parcels() + upsert_parcels().
         Populates tranchi.parcels only — does NOT write tranchi.listings.
@@ -166,8 +172,10 @@ async def _run_scraper(
         # registry. Alternatively derive site_name from a mock instance.
         _probe = scraper_cls.__new__(scraper_cls)
         site_name_for_query = getattr(_probe, "site_name", scraper_key)
-        last_run_date = await _get_last_successful_run(pool, site_name_for_query)
-        if last_run_date:
+        last_run_date = None if full else await _get_last_successful_run(pool, site_name_for_query)
+        if full:
+            logger.info("%s: FULL re-pull (status refresh — last_run_date=None)", site_name_for_query)
+        elif last_run_date:
             logger.info(
                 "%s: incremental pull from last successful run %s",
                 site_name_for_query, last_run_date,
@@ -650,17 +658,33 @@ def _transfer_predicate() -> str:
     (market-agnostic): parcel changed hands after we first listed it.
     """
     clauses: list[str] = []
+    seen: set[str] = set()
     for cfg in MARKETS.values():
         rule = cfg.get("probate_transfer_rule")
         if not rule:
             continue
-        start, length = rule["filing_year_substr"]
-        clauses.append(
-            "(l.signal_type = 'probate' "
-            f"AND l.case_number ~ '{rule['case_regex']}' "
-            "AND p.last_sale_date >= make_date("
-            f"CAST(substring(l.case_number FROM {int(start)} FOR {int(length)}) AS INTEGER), 1, 1))"
-        )
+        if "filing_year_substr" in rule:
+            # Year encoded in the case number (Cuyahoga '2026EST...').
+            start, length = rule["filing_year_substr"]
+            clause = (
+                "(l.signal_type = 'probate' "
+                f"AND l.case_number ~ '{rule['case_regex']}' "
+                "AND p.last_sale_date >= make_date("
+                f"CAST(substring(l.case_number FROM {int(start)} FOR {int(length)}) AS INTEGER), 1, 1))"
+            )
+        elif rule.get("mode") == "filing_date":
+            # No year in the case number (Shelby PR#####) — compare against the persisted
+            # filing_date column. Only probate rows ever carry filing_date, so this naturally
+            # scopes to the markets that set it.
+            clause = (
+                "(l.signal_type = 'probate' AND l.filing_date IS NOT NULL "
+                "AND p.last_sale_date >= l.filing_date)"
+            )
+        else:
+            continue
+        if clause not in seen:
+            seen.add(clause)
+            clauses.append(clause)
     # (2) any source: parcel changed hands after we first listed it.
     clauses.append("(p.last_sale_date > l.first_seen_at::date)")
     return " OR ".join(clauses)
@@ -854,6 +878,12 @@ async def main() -> int:
         action="store_true",
         help="Parse and filter listings but skip DB writes",
     )
+    parser.add_argument(
+        "--full",
+        action="store_true",
+        help="Force a FULL re-pull for delta scrapers (code_violations status refresh) "
+             "instead of the incremental window. Use with --site.",
+    )
     args = parser.parse_args()
 
     if not _SCRAPERS:
@@ -903,7 +933,7 @@ async def main() -> int:
 
         results: list[ScrapeResult] = []
         for key in scraper_keys:
-            result = await _run_scraper(key, pool, dry_run=args.dry_run)
+            result = await _run_scraper(key, pool, dry_run=args.dry_run, full=args.full)
             results.append(result)
 
         _print_results_table(results)

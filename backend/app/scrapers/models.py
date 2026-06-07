@@ -70,6 +70,11 @@ class RawListing(BaseModel):
     # ProWare internal case id (probate). Persisted so a case can be re-fetched by id
     # (1 cheap request) instead of a fuzzy Case Search. NULL for non-probate.
     probate_internal_id: int | None = None
+    # Court filing date (probate). Markets whose case_number encodes the filing year
+    # (Cuyahoga '2026EST...') don't need this; Shelby PR-numbers carry no year, so the
+    # persisted filing_date is the only sold-after-filing signal for the auto-transfer
+    # rule (run.py _transfer_predicate `filing_date` mode). NULL for non-probate.
+    filing_date: date | None = None
 
 
 class RawSignal(BaseModel):

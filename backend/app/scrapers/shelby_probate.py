@@ -389,7 +389,7 @@ async def _upsert_signal(pool: Any, parcel: str, case_id: str, decedent: str, sc
 def _build_listing(
     *, parcel: str, situs: str | None, case_id: str, case_status: str | None,
     decedent: str | None, case_title: str | None, method: str, tier: str, score: float,
-    probate_internal_id: int,
+    probate_internal_id: int, filing_date: date | None = None,
 ) -> RawListing:
     city, zip5 = _city_zip(situs)
     return RawListing(
@@ -412,6 +412,7 @@ def _build_listing(
         case_title=case_title,
         decedent_dod=None,  # not exposed in the Shelby public view
         probate_internal_id=probate_internal_id,
+        filing_date=filing_date,
     )
 
 
@@ -582,6 +583,7 @@ class ShelbyProbateScraper(ListingScraper):
                             parcel=parcel, situs=situs, case_id=case_id, case_status=case_status,
                             decedent=decedent, case_title=case_title, method=method, tier=tier,
                             score=score, probate_internal_id=current,
+                            filing_date=parsed.get("filing_date"),
                         ))
                         emitted += 1
                         if not self.dry_run:

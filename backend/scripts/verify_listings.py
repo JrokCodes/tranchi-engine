@@ -139,6 +139,11 @@ def _source_and_check(r: asyncpg.Record, market: dict) -> tuple[str, str]:
             chk = (f"(1) Land Bank still lists this property  "
                    f"(2) MyPlace parcel {parcel} confirms address  "
                    f"(3) Redfin/Zillow off-market = expected (county-owned)  -- {addr_hint}")
+        elif sig == "tax_delinquent":
+            chk = (f"PRE-DISTRESS LEAD: (1) MyPlace parcel {parcel}: delinquent balance owed (>=$2k/foreclosure), owner = private party  "
+                   f"(2) NOT on the DLN sheriff-sale feed (else it's a buy-now deal, not a lead)  "
+                   f"(3) Owner not recently transferred (still the distressed owner)  "
+                   f"(4) Redfin/Zillow OFF-market = good (motivated, not yet listed)  -- {addr_hint}")
         else:
             chk = f"(1) MyPlace parcel {parcel} exists  (2) Redfin/Zillow check  -- {addr_hint}"
     else:
@@ -491,6 +496,34 @@ def _build_layer1_cuyahoga(r: asyncpg.Record, sig: str, parcel: str,
             "stored": [
                 ("Parcel", parcel),
                 ("Address", r["property_address"] or "—"),
+            ],
+        }
+    elif sig == "tax_delinquent":
+        # Pre-Distress LEAD — MyPlace is the authority (owner + delinquent tax balance).
+        return {
+            "title": "Cuyahoga MyPlace — Parcel Page (Tax-Delinquent Lead)",
+            "url": f"https://myplace.cuyahogacounty.gov/?parcel={parcel}",
+            "search_for": (
+                "PRE-DISTRESS LEAD (owner under pressure, NOT yet for sale). Open the MyPlace "
+                f"parcel page for {parcel}. Confirm a DELINQUENT tax balance is owed and the owner "
+                "is a private party (not the county / a public body). The 'Tax Information' tab "
+                "shows the unpaid balance + years delinquent."
+            ),
+            "look_for": (
+                "VALID: parcel owes delinquent taxes (>= $2k or flagged for foreclosure), owner is a "
+                "private party, and it is NOT already on the DLN sheriff-sale feed (that would be a "
+                "buy-now deal, not a pre-distress lead). Off-market on Zillow/Redfin = consistent with "
+                "a distressed owner (good). "
+                "RED FLAGS: balance paid off / $0 due (resolved — not distress); a recent transfer to a "
+                "new private owner on MyPlace (sold — should auto-retire via last_sale_date); actively "
+                "listed for sale on MLS (owner already selling normally — note in outreach)."
+            ),
+            "stored": [
+                ("Signal Type", "tax_delinquent (Pre-Distress Lead)"),
+                ("Parcel", parcel),
+                ("Property Address", r["property_address"] or "—"),
+                ("Owner (MyPlace — should be the distressed private owner)", r["owner_name"] or "(not enriched)"),
+                ("First Seen By Us", first_seen_label),
             ],
         }
     else:

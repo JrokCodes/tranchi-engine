@@ -186,12 +186,77 @@ def _make_cuyahoga_market() -> dict:
                 "MyPlace shows a private owner (already sold)."
             ),
         },
+        # Pre-Distress LEADS (surface_distress.py). tax_delinquent is live; code_violation is
+        # gated on the status-refresh cron (see distress_lead_rules).
+        "tax_delinquent": {
+            "valid": (
+                "MyPlace shows a delinquent tax balance owed (>= $2k or flagged for foreclosure) with a "
+                "private-party owner. PRE-DISTRESS LEAD — the owner is under pressure but the property is "
+                "NOT yet for sale through any channel. Off-market on Zillow/Redfin is consistent with a "
+                "distressed owner who hasn't listed (good)."
+            ),
+            "red_flags": (
+                "Balance paid off / $0 due (resolved — not distress). Already on the DLN sheriff-sale feed "
+                "(that's a buy-now deal, not a lead). A recent transfer to a new private owner on MyPlace "
+                "(already sold). Actively listed on MLS (owner selling normally — note in outreach)."
+            ),
+        },
+        "code_violation": {
+            "valid": (
+                "Cleveland Accela shows an OPEN building/housing violation cited within ~24 months with a "
+                "private-party owner. PRE-DISTRESS LEAD — chronic-violation owner under pressure, not yet "
+                "selling. Off-market on Zillow/Redfin is consistent (good)."
+            ),
+            "red_flags": (
+                "Violation status is Closed / resolved (not distress). Cited > 24 months ago (stale). "
+                "Recent transfer to a new owner (already sold). Actively listed on MLS."
+            ),
+        },
     }
 
     return {
         "db": "tranchi",
         "state": "OH",
         "state_filter": "l.property_state = 'OH'",
+        # Pre-distress lead surfacing (surface_distress.py). `distress_lead_county` is the
+        # county label stamped on lead rows. `distress_lead_rules` (per signal_type):
+        #   address_source 'payload' — Cuyahoga signal payloads carry the FULL situs
+        #     ("STREET, CITY, OH, ZIP"); the parcel spine is too thin (~23% situs) to rely on.
+        #   gate_sql — the defensible-slice filter (REAL pre-distress only): tax = balance
+        #     >= $2k OR foreclosure-flagged; code_violation = OPEN and cited within 24 months
+        #     (most violations are Closed/resolved = not distress). Regex guards on the cast
+        #     columns keep a malformed payload value from aborting the whole INSERT.
+        # Surfaced only once tranchi.distress_lead_types has the matching enabled rows (mig 016).
+        "distress_lead_county": "Cuyahoga",
+        "distress_lead_rules": {
+            "tax_delinquent": {
+                "address_source": "payload",
+                "address_key": "address",
+                "owner_key": "owner",
+                "gate_sql": (
+                    "((s.payload->>'delq_balance' ~ '^[0-9.]+$' "
+                    "  AND (s.payload->>'delq_balance')::numeric >= 2000) "
+                    " OR s.payload->>'foreclosure' = 'true')"
+                ),
+            },
+            # GATED ON THE STATUS-REFRESH CRON. cleveland_open_data is a DELTA pull (only new
+            # filings each 3h), so existing signals' Open/Closed status + last_seen_at freeze at
+            # first scrape. The `run.py --site code_violations --full` cron (every ~3 days) re-pulls
+            # the full Notices layer — the source DOES carry live VIOLATION_APP_STATUS — refreshing
+            # status (resolved -> Closed, dropped by this gate) + freshness so the standard 4-day
+            # gate applies. The distress_lead_types row starts disabled until a refresh validates
+            # the live Open+<=24mo slice; then flip enabled=true.
+            "code_violation": {
+                "address_source": "payload",
+                "address_key": "address_full",
+                "owner_key": None,
+                "gate_sql": (
+                    "(s.payload->>'status' ILIKE 'open' "
+                    " AND s.payload->>'open_date' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}' "
+                    " AND (s.payload->>'open_date')::date >= now() - interval '24 months')"
+                ),
+            },
+        },
         "deal_sources": (
             "probate",
             "tax_delinquent_foreclosure",
@@ -398,6 +463,18 @@ def _make_shelby_market() -> dict:
         "db": "tranchi",
         "state": "TN",
         "state_filter": "l.property_state = 'TN'",
+        # Pre-distress lead surfacing (surface_distress.py). Shelby sources the lead address
+        # from the parcel SPINE (situs_address; the signal payload location is street-only)
+        # and surfaces EVERY fresh signal (gate_sql=None) — the byte-for-byte prior behavior,
+        # preserved by the market-aware refactor. (Cuyahoga, by contrast, reads the payload
+        # and applies a defensible-slice gate — see that market's distress_lead_rules.)
+        "distress_lead_county": "Shelby",
+        "distress_lead_rules": {
+            "tax_delinquent": {"address_source": "spine", "address_key": None,
+                               "owner_key": "owner", "gate_sql": None},
+            "eviction": {"address_source": "spine", "address_key": None,
+                         "owner_key": "owner", "gate_sql": None},
+        },
         "deal_sources": (
             "tax_deed",
             "land_bank_inventory",
@@ -434,12 +511,13 @@ def _make_shelby_market() -> dict:
             "Shelby Tax Delinquent (Lead)": ("https://www.shelbycountytrustee.com/259/Delinquent-Realty-Lawsuit-List", "lead"),
             "Shelby Eviction (Lead)": ("https://data.midsouth.io/", "lead"),
         },
-        # Shelby probate case numbers (PR#####) carry NO filing year, so there is no
-        # sold-after-filing auto-transfer rule today. NOTE: this means Shelby probate
-        # listings are not auto-transferred on sale (Rule 2 in _mark_transferred_listings
-        # still applies once sale-date enrichment covers them). Tracked follow-up:
-        # add a Shelby case parser — _FUTURE-ARCHITECTURE-HANDOFF.md.
-        "probate_transfer_rule": None,
+        # Shelby probate case numbers (PR#####) carry NO filing year, so the
+        # `filing_year_substr` variant (Cuyahoga) can't apply. Instead shelby_probate.py
+        # parses + persists the court filing_date onto the listing, and the `filing_date`
+        # mode compares it directly: a probate parcel sold AT/AFTER its filing date is no
+        # longer an estate asset (run.py::_transfer_predicate). Rule 2 (sold-while-listed)
+        # still applies on top once sale-date enrichment covers these parcels.
+        "probate_transfer_rule": {"mode": "filing_date"},
         # TN redeemable tax deed (TCA 67-5-2701): after the sale the original owner has a
         # delinquency-age-driven window to redeem. Tiers evaluated top-down; first match
         # wins. `not_null` tier = basis present but below all thresholds; `default` = basis
