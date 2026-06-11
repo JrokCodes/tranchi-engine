@@ -341,7 +341,7 @@ _BASE_SELECT = """
         l.last_seen_at,
         COALESCE(sig.n, 0)              AS signal_count,
         sig.type_counts                 AS type_counts,
-        p.owner_name,
+        COALESCE(p.owner_name, '(Owner not found)') AS owner_name,
         p.situs_address,
         p.current_market_value,
         p.current_tax_balance,
@@ -618,7 +618,7 @@ async def get_listing(
             parcel = ParcelDetail(
                 parcel_number=p_row["parcel_number"],
                 native_parcel_id=p_row["native_parcel_id"],
-                owner_name=p_row["owner_name"],
+                owner_name=p_row["owner_name"] or "(Owner not found)",
                 situs_address=p_row["situs_address"],
                 owner_mailing_address=p_row["owner_mailing_address"],
                 current_market_value=_to_float(p_row["current_market_value"]),

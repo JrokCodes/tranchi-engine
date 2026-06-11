@@ -573,6 +573,55 @@ async def _ensure_parcels_for_listings(pool: asyncpg.Pool) -> int:
         return 0
 
 
+async def _backfill_owner_from_delinquency(pool: asyncpg.Pool) -> int:
+    """Fill owner_name on owner-less Shelby parcels from the county tax-delinquency record.
+
+    Some Shelby parcels (alpha-suffix sub-parcels like ...003M, and address-only
+    foreclosures) never join the ReGIS spine, so their owner_name stays NULL. But the
+    Trustee delinquent-tax lawsuit list names the owner of record ('Name' column),
+    which we already capture in the tax_delinquent signal payload ('owner'). This copies
+    that authoritative name onto the owner-less parcel.
+
+    Safety invariants (do not weaken):
+      - market='shelby' only (the delinquency 'owner' field is TN/Shelby-specific; OH
+        owners come from MyPlace and are ~100% covered already).
+      - COALESCE-null-only: fills ONLY where parcels.owner_name IS NULL/'' — never
+        clobbers a registry-sourced owner. Idempotent + safe to run every cycle, so new
+        owner-less rows self-heal.
+    Returns count of parcels filled.
+    """
+    try:
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                UPDATE tranchi.parcels p
+                SET owner_name = s.owner,
+                    last_seen_at = now()
+                FROM (
+                    SELECT DISTINCT ON (parcel_number)
+                           parcel_number,
+                           NULLIF(btrim(payload->>'owner'), '') AS owner
+                    FROM tranchi.signals
+                    WHERE signal_type = 'tax_delinquent'
+                      AND NULLIF(btrim(payload->>'owner'), '') IS NOT NULL
+                    ORDER BY parcel_number, observed_at DESC
+                ) s
+                WHERE p.parcel_number = s.parcel_number
+                  AND p.market = 'shelby'
+                  AND (p.owner_name IS NULL OR p.owner_name = '')
+                """
+            )
+            count = int(result.split()[-1]) if result else 0
+            if count > 0:
+                logger.info(
+                    "Owner backfill (delinquency name): filled %d owner-less Shelby parcels", count
+                )
+            return count
+    except Exception as exc:
+        logger.warning("Owner backfill from delinquency failed: %s", exc)
+        return 0
+
+
 async def _mark_expired_listings(pool: asyncpg.Pool) -> int:
     """Mark listings with past sale dates as 'expired'."""
     try:
@@ -942,6 +991,7 @@ async def main() -> int:
             delisted = await _mark_stale_listings(pool, results, run_start)
             expired = await _mark_expired_listings(pool)
             stubs = await _ensure_parcels_for_listings(pool)
+            owner_bf = await _backfill_owner_from_delinquency(pool)
             # Surface pre-distress signal parcels as distress_stage='distress_signal' LEADS
             # BEFORE the transfer/dedup guards so leads get the same off-market + dedup
             # treatment as buy-now deals (migration 012).
@@ -954,10 +1004,10 @@ async def main() -> int:
             leads_ins = sum(s.get("inserted", 0) for s in lead_stats.values())
             leads_ret = sum(s.get("retired", 0) + s.get("retired_disabled", 0) for s in lead_stats.values())
             logger.info(
-                "Post-run: %d delisted, %d expired, %d parcel-stubs, %d distress-leads(+) "
-                "%d distress-leads(-), %d no-number, %d transferred, %d redemption-windows, "
-                "%d finalized, %d dupes",
-                delisted, expired, stubs, leads_ins, leads_ret, no_num, transferred,
+                "Post-run: %d delisted, %d expired, %d parcel-stubs, %d owner-backfill, "
+                "%d distress-leads(+) %d distress-leads(-), %d no-number, %d transferred, "
+                "%d redemption-windows, %d finalized, %d dupes",
+                delisted, expired, stubs, owner_bf, leads_ins, leads_ret, no_num, transferred,
                 redeem_win, finalized, dupes,
             )
 
