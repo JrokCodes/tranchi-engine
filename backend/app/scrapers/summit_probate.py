@@ -744,12 +744,16 @@ def _build_listing(
     match_confidence: str,
     match_score: float,
 ) -> RawListing:
+    # property_address = STREET ONLY. The spine situs is "<street>, <city>, OH"; storing the
+    # full string here while ALSO setting property_city below double-prints the city on the
+    # dashboard ("Tallmadge City, Oh, Tallmadge"). Take the segment before the first comma.
+    _street_only = (situs_address or "").split(",")[0].strip()
     return RawListing(
         source_site=SITE_NAME,
         source_listing_id=normalize_parcel_number(parcel_number) or parcel_number,
         case_number=case_number,
         signal_type=SIGNAL_TYPE,
-        property_address=canonical_address(situs_address) or (situs_address or ""),
+        property_address=canonical_address(_street_only) or _street_only or (situs_address or ""),
         property_city=city,
         property_county="Summit",
         property_state="OH",

@@ -604,7 +604,7 @@ def _make_summit_market() -> dict:
                     native_parcel_id: str | None = None) -> str:
         sig = signal_type or ""
         if sig == "probate":
-            return f"https://probate.summitoh.net/eservices/home.page.2   (search case {case or '?'})"
+            return f"https://search.summitohioprobate.com/eservices/home.page.2   (search case {case or '?'})"
         elif sig in ("mortgage_foreclosure", "tax_delinquent_foreclosure"):
             return "https://summit.sheriffsaleauction.ohio.gov/   (Summit Sheriff Sale — find by case/parcel/date)"
         elif sig == "land_bank_inventory":
@@ -673,6 +673,20 @@ def _make_summit_market() -> dict:
                 "Balance cured / absent from the new monthly tape (resolved). Already on a RealAuction roster "
                 "(that's a buy-now deal, not a lead). GIS shows a recent transfer to a new private owner (sold). "
                 "Actively listed on MLS (owner selling normally — note in outreach)."
+            ),
+        },
+        # Pre-Distress LEAD (filing stage, ALN /notices/foreclosures) — surfaced only after buy-now verified.
+        "foreclosure_filing": {
+            "valid": (
+                "A foreclosure COMPLAINT was filed in Common Pleas (Akron Legal News notice) — the earliest "
+                "distress stage, months before any sheriff sale. PRE-DISTRESS LEAD: the owner is in the "
+                "pipeline but the property is NOT yet at auction or for sale. GIS Fiscal confirms the parcel + "
+                "a private-party owner. Off-market on Zillow/Redfin is consistent (good)."
+            ),
+            "red_flags": (
+                "The case has already advanced to a scheduled sheriff sale on RealAuction (that's a buy-now "
+                "deal now, not a lead). The complaint was dismissed/withdrawn. GIS shows a recent transfer to a "
+                "new private owner (resolved / sold). Actively listed on MLS."
             ),
         },
     }
@@ -750,7 +764,7 @@ def _make_summit_market() -> dict:
             ),
             "Summit Sheriff Sale (RealAuction)": ("https://summit.sheriffsaleauction.ohio.gov/", "deal"),
             "Akron Legal News": ("https://www.akronlegalnews.com/notices/sheriff_sale_abstracts", "deal"),
-            "Summit Probate Court": ("https://probate.summitoh.net/eservices/home.page.2", "deal"),
+            "Summit Probate Court": ("https://search.summitohioprobate.com/eservices/home.page.2", "deal"),
             "Summit County Land Bank": ("https://summit-county-oh-publicity.tolemi.com/", "deal"),
             "Summit Delinquent Tax": (
                 "https://fiscaloffice.summitoh.net/index.php/documents-a-forms/finish/10-cama/282-sc720delq",
