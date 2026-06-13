@@ -348,17 +348,23 @@ _BASE_SELECT = """
         p.delinquent_flag,
         p.native_parcel_id
     FROM tranchi.listings l
-    LEFT JOIN (
-        SELECT parcel_number,
-               jsonb_object_agg(signal_type, cnt) AS type_counts,
-               sum(cnt)::int                       AS n
+    -- PERF (2026-06-13): per-listing LATERAL lookup on the indexed signals.parcel_number,
+    -- NOT a full-table GROUP BY of tranchi.signals. The old subquery aggregated EVERY
+    -- signal (~110K rows across all markets) on every call; under a source_site/market
+    -- filter the planner mis-estimated its cardinality (200 vs ~89K) and flipped to a
+    -- nested loop, hanging the request. The LATERAL is an index scan per row and returns
+    -- the SAME sig.n + sig.type_counts (sum/jsonb_object_agg over the empty set = NULL,
+    -- so the has_signals (`sig.n IS NULL`) / min_signals gates keep identical semantics).
+    LEFT JOIN LATERAL (
+        SELECT sum(cnt)::int                       AS n,
+               jsonb_object_agg(signal_type, cnt)  AS type_counts
         FROM (
-            SELECT parcel_number, signal_type, count(*) AS cnt
-            FROM tranchi.signals
-            GROUP BY parcel_number, signal_type
+            SELECT signal_type, count(*) AS cnt
+            FROM tranchi.signals s
+            WHERE s.parcel_number = l.source_listing_id
+            GROUP BY signal_type
         ) z
-        GROUP BY parcel_number
-    ) sig ON sig.parcel_number = l.source_listing_id
+    ) sig ON true
     -- Parcel join market-scoped on the county-level `market` (migration 014): a listing
     -- only enriches from a parcel in its own market, so a same-state second county whose
     -- per-county parcel numbers could collide can never cross-enrich (the #10 guarantee).
@@ -543,11 +549,14 @@ async def list_listings(
     count_sql = f"""
         SELECT COUNT(*)
         FROM tranchi.listings l
-        LEFT JOIN (
-            SELECT parcel_number, count(*) AS n
-            FROM tranchi.signals
-            GROUP BY parcel_number
-        ) sig ON sig.parcel_number = l.source_listing_id
+        -- PERF: per-listing LATERAL (see _BASE_SELECT note). NULLIF(count,0) preserves the
+        -- old LEFT-JOIN semantics where a no-signal parcel yields sig.n = NULL (so the
+        -- has_signals / min_signals gates that reference sig.n behave identically).
+        LEFT JOIN LATERAL (
+            SELECT NULLIF(count(*), 0)::int AS n
+            FROM tranchi.signals s
+            WHERE s.parcel_number = l.source_listing_id
+        ) sig ON true
         {where_sql}
     """
     total: int = await conn.fetchval(count_sql, *params)
