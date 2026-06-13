@@ -643,9 +643,24 @@ async def _resolve_address_to_parcel(
     house_num = parts[0] if parts[0].isdigit() else None
     street_body = " ".join(parts[1:]) if house_num else street
 
-    # Require the house number + at least 4 chars of street name to avoid
+    # SUFFIX-AGNOSTIC MATCH: the decedent blob carries the FULL street type
+    # ("Conlin Drive") but the GIS spine stores the ABBREVIATED form ("Conlin Dr"),
+    # so an exact ILIKE on the full suffix matches 0 rows (the real cause of a
+    # probate=0 first run). Drop a trailing street-type word and match on the
+    # street-name STEM; house# + stem + the _AMBIGUITY_CAP keep precision.
+    _STREET_TYPES = {
+        "drive", "dr", "street", "st", "avenue", "ave", "road", "rd", "lane", "ln",
+        "court", "ct", "boulevard", "blvd", "way", "place", "pl", "circle", "cir",
+        "trail", "trl", "terrace", "ter", "parkway", "pkwy", "highway", "hwy",
+        "square", "sq", "loop", "run", "path", "point", "pt", "crossing", "xing",
+    }
+    _sb_parts = street_body.split()
+    if len(_sb_parts) >= 2 and _sb_parts[-1].lower().strip(".") in _STREET_TYPES:
+        street_body = " ".join(_sb_parts[:-1])
+
+    # Require the house number + at least 3 chars of street stem to avoid
     # false matches across Summit's 261K parcel spine
-    if not house_num or len(street_body) < 4:
+    if not house_num or len(street_body) < 3:
         return []
 
     try:
