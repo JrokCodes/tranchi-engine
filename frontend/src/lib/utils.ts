@@ -15,7 +15,13 @@ export function formatCurrency(value: number): string {
 
 export function formatDate(isoStr: string | null | undefined): string {
   if (!isoStr) return '—';
-  const d = new Date(isoStr);
+  // A date-only value ('YYYY-MM-DD', e.g. a sale_date) parses as UTC midnight, which
+  // toLocaleDateString then shifts back a day in any negative-offset zone (e.g. ET) —
+  // a sale_date of 2026-08-07 would render 'Aug 6'. Append local midnight so date-only
+  // values are interpreted in the viewer's timezone. Full ISO timestamps (with a 'T',
+  // e.g. started_at/observed_at) are left exactly as-is.
+  const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(isoStr);
+  const d = new Date(dateOnly ? isoStr + 'T00:00:00' : isoStr);
   if (isNaN(d.getTime())) return '—';
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
