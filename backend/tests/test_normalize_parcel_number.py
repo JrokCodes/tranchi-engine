@@ -63,3 +63,48 @@ def test_unparseable_returns_cleaned() -> None:
     """Input that can't be parsed to 8 digits is returned cleaned (no crash)."""
     result = normalize_parcel_number("UNKNOWN-PARCEL")
     assert result == "UNKNOWN-PARCEL"
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# Summit County (OH / Akron) — 7-digit zero-padded numeric canonical form.
+# These prove the new branch works AND that it does not collide with the
+# Cuyahoga (8-digit) or Shelby (>= 10-digit / alpha / spaced) detection above.
+# Format-lock anchors traced live across the GIS spine + RealAuction + Akron
+# Legal News + delinquent-tax tape + land bank (2026-06-13).
+# ───────────────────────────────────────────────────────────────────────────
+
+def test_summit_seven_digit_idempotent() -> None:
+    """A 7-digit Summit parcel is returned unchanged (GIS spine / land bank / DELQ)."""
+    assert normalize_parcel_number("7000697") == "7000697"
+    assert normalize_parcel_number("6700526") == "6700526"
+    assert normalize_parcel_number("2400024") == "2400024"
+
+
+def test_summit_leading_zero_preserved() -> None:
+    """Leading zeros are load-bearing — never int-cast away (DELQ tape parcel)."""
+    assert normalize_parcel_number("0101379") == "0101379"
+    assert normalize_parcel_number("0211528") == "0211528"
+
+
+def test_summit_dash_display_form() -> None:
+    """Fiscal-office display dash ('67-08383') and Akron Legal News ('70-00697') strip to 7 digits."""
+    assert normalize_parcel_number("67-08383") == "6708383"
+    assert normalize_parcel_number("70-00697") == "7000697"
+    assert normalize_parcel_number("02-11528") == "0211528"
+
+
+def test_summit_dropped_leading_zero_zfilled() -> None:
+    """Defensive: a source dropping a leading zero ('101379') zero-pads back to 7."""
+    assert normalize_parcel_number("101379") == "0101379"
+
+
+def test_summit_does_not_break_cuyahoga_or_shelby() -> None:
+    """The Summit branch must not capture Cuyahoga (8-digit) or Shelby (>=10 / alpha / spaced)."""
+    # Cuyahoga stays Cuyahoga
+    assert normalize_parcel_number("11019068") == "110-19-068"
+    assert normalize_parcel_number("110-19-068") == "110-19-068"
+    # Shelby stays Shelby
+    assert normalize_parcel_number("07204700000160") == "07204700000160"
+    assert normalize_parcel_number("072047  00016") == "07204700000160"
+    assert normalize_parcel_number("D0217   00225") == "D0217000002250"
+    assert normalize_parcel_number("07204700016") == "07204700000160"

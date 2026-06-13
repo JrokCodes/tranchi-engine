@@ -576,10 +576,236 @@ def _make_shelby_market() -> dict:
     }
 
 
+def _make_summit_market() -> dict:
+    """Summit County (Akron, OH) market config.
+
+    OH framework carries over from Cuyahoga (judicial foreclosure via sheriff sale,
+    tax foreclosure, probate; sale FINAL at confirmation — no MI-style redemption).
+    Single canonical parcel format: 7-digit zero-padded string (normalize_parcel_number
+    'summit' branch). Buy-now sources: RealAuction (mortgage Fri + tax Tue, ONE source_site
+    emitting two signal_types — the DLN precedent), Akron Legal News (cross-check / enrich),
+    Probate (CourtView eServices), Land Bank (Tolemi). Pre-distress lever: delinquent-tax
+    signal (SC720_DELQ tape) surfaced via surface_distress (enabled only after buy-now verify).
+
+    AUTHORITY for the catalog cross-check = the Summit GIS spine `ownernme1` (current owner),
+    the same role Cuyahoga EPV `parcel_owner` plays. RealAuction Tue/Fri rosters are pre-sale
+    catalogs (rows can cancel/redeem/sell) — the live-authority owner cross-check is mandatory.
+    """
+
+    def registry_link(parcel: str | None, address: str | None,
+                      native_parcel_id: str | None = None) -> str:
+        # Summit Fiscal Office property search (human-facing current-owner authority).
+        # No stable per-parcel deep-link param confirmed — opens the search page; the
+        # GIS spine ownernme1 we ingest is the machine authority for the cross-check.
+        return "https://fiscaloffice.summitoh.net/index.php/property-search"
+
+    def source_link(signal_type: str, parcel: str | None, case: str | None,
+                    sale_date, address: str | None,
+                    native_parcel_id: str | None = None) -> str:
+        sig = signal_type or ""
+        if sig == "probate":
+            return f"https://probate.summitoh.net/eservices/home.page.2   (search case {case or '?'})"
+        elif sig in ("mortgage_foreclosure", "tax_delinquent_foreclosure"):
+            return "https://summit.sheriffsaleauction.ohio.gov/   (Summit Sheriff Sale — find by case/parcel/date)"
+        elif sig == "land_bank_inventory":
+            return "https://summit-county-oh-publicity.tolemi.com/   (Summit County Land Bank inventory)"
+        elif sig == "tax_delinquent":
+            return "https://fiscaloffice.summitoh.net/index.php/property-search   (Fiscal Office delinquent-tax record)"
+        else:
+            return "https://fiscaloffice.summitoh.net/index.php/property-search"
+
+    def offmarket_links(address: str, city: str | None, zip_: str | None) -> tuple[str, str]:
+        return _zillow_url(address, city, "OH", zip_), _redfin_url(address, city, "OH", zip_)
+
+    verification_guide = {
+        "mortgage_foreclosure": {
+            "valid": (
+                "Row still on the Summit Sheriff Sale (RealAuction, Fridays) roster with matching "
+                "case# and a sale date >= today. Owner faces a lender-forced sale. The Summit GIS "
+                "Fiscal record confirms the current owner and shows no recent transfer."
+            ),
+            "red_flags": (
+                "Row dropped off the RealAuction roster (sale cancelled / redeemed / settled). "
+                "Sale date is in the past (STALE). GIS Fiscal record shows a new owner — already sold."
+            ),
+        },
+        "tax_delinquent_foreclosure": {
+            "valid": (
+                "Row on the Summit Sheriff Sale (RealAuction, TUESDAYS) roster with the tax signature "
+                "(Appraised $0.00 + flat $1,000 deposit). By ORC 5721.19 these are tax-impositions sales "
+                "— already delinquent. Sale date >= today; GIS Fiscal confirms the parcel + owner."
+            ),
+            "red_flags": (
+                "Row dropped off the Tuesday roster (redeemed before sale / cancelled). Sale date past "
+                "(STALE). GIS shows a recent transfer to a new private owner (paid off / sold)."
+            ),
+        },
+        "probate": {
+            "valid": (
+                "Summit Probate (CourtView eServices) shows the estate case OPEN (Case Status = Open). "
+                "The case number's leading year matches its filing year. The decedent (NOT the fiduciary) "
+                "maps to a Summit residential parcel — a real estate-in-probate where heirs may sell fast."
+            ),
+            "red_flags": (
+                "Case Status = Closed (estate settled — dead lead). Decedent doesn't map to any real "
+                "property. A GIS transfer at/after the case filing year means the property already sold "
+                "out of the estate (our _mark_transferred_listings guard removes it)."
+            ),
+        },
+        "land_bank_inventory": {
+            "valid": (
+                "Parcel still on the Summit County Land Bank (Tolemi publiCity) inventory. GIS Fiscal "
+                "confirms the parcel. County-held, priced for redevelopment — expect discount + restrictions."
+            ),
+            "red_flags": (
+                "Parcel no longer on the Land Bank inventory (sold / under contract — our scraper marks it "
+                "not_listed next cycle). GIS shows a private owner (already conveyed out)."
+            ),
+        },
+        # Pre-Distress LEAD (surface_distress.py) — surfaced only after buy-now is verified.
+        "tax_delinquent": {
+            "valid": (
+                "On the SC720_DELQ certified-delinquent tape with a balance (>= $2k on a residential parcel) "
+                "and a PRIVATE-party owner. PRE-DISTRESS LEAD — owner under tax pressure but NOT yet for sale "
+                "through any channel. Off-market on Zillow/Redfin is consistent with a distressed owner (good)."
+            ),
+            "red_flags": (
+                "Balance cured / absent from the new monthly tape (resolved). Already on a RealAuction roster "
+                "(that's a buy-now deal, not a lead). GIS shows a recent transfer to a new private owner (sold). "
+                "Actively listed on MLS (owner selling normally — note in outreach)."
+            ),
+        },
+    }
+
+    return {
+        "db": "tranchi",
+        "state": "OH",
+        "state_filter": "l.property_state = 'OH'",
+        # Pre-distress lead surfacing (surface_distress.py). Summit sources the lead ADDRESS
+        # from the parcel SPINE (situs_address) — the SC720_DELQ tape's PROPERTY_ADDRESS is
+        # ~26% blank, and its TAXBILL_ADDRESS is the OWNER MAILING address, not the situs; the
+        # spine joins the 7-digit parcel 1:1 and always carries situs. gate_sql = the defensible
+        # slice: certified balance >= $2k AND residential land-use (Summit LUC 5xx). Regex guards
+        # on the cast columns keep a malformed payload value from aborting the whole INSERT.
+        # The distress_lead_types row (migration 017) starts DISABLED — surfaced only once buy-now
+        # is verified (G1 ruling 2026-06-11), then flip enabled=true.
+        "distress_lead_county": "Summit",
+        "distress_lead_rules": {
+            "tax_delinquent": {
+                "address_source": "spine",
+                "address_key": None,
+                "owner_key": "owner",
+                "gate_sql": (
+                    "((s.payload->>'delq_amount' ~ '^[0-9.]+$' "
+                    "  AND (s.payload->>'delq_amount')::numeric >= 2000) "
+                    " AND s.payload->>'luc' ~ '^5')"
+                ),
+            },
+            # Foreclosure-FILING stage (Akron Legal News /notices/foreclosures) — the
+            # earliest distress signal (complaint filed, months before any sheriff sale).
+            # gate_sql=None: a filing is itself the escalation, so every fresh one surfaces
+            # (unlike the 28K raw tax tape that needs a $2k floor). Address from the spine
+            # (the 7-digit parcel joins 1:1). Surfaced only when its distress_lead_types row
+            # is enabled — held OFF until buy-now is verified (G1 discipline).
+            "foreclosure_filing": {
+                "address_source": "spine",
+                "address_key": None,
+                "owner_key": "owner",
+                "gate_sql": None,
+            },
+        },
+        "deal_sources": (
+            "mortgage_foreclosure",
+            "tax_delinquent_foreclosure",
+            "probate",
+            "land_bank_inventory",
+            "tax_delinquent",      # Pre-Distress LEAD (SC720_DELQ certified-delinquent tape)
+            "foreclosure_filing",  # Pre-Distress LEAD (ALN Common Pleas foreclosure complaints)
+        ),
+        "source_sites": {
+            # RealAuction is ONE source_site emitting BOTH mortgage (Fri) + tax (Tue)
+            # signal_types — the DLN precedent. Mapped here to its primary (mortgage).
+            "Summit Sheriff Sale (RealAuction)": "mortgage_foreclosure",
+            "Akron Legal News": "mortgage_foreclosure",
+            "Summit Probate Court": "probate",
+            "Summit County Land Bank": "land_bank_inventory",
+            "Summit Foreclosure Filings (ALN)": "foreclosure_filing",
+            "Summit Tax Delinquent (Lead)": "tax_delinquent",
+            "Summit Foreclosure Filing (Lead)": "foreclosure_filing",
+        },
+        # Per-source retirement policy. RealAuction (catalog) + ALN + Land Bank re-pull their
+        # full live set each run (absence = resolved); Probate is a CURSOR forward-walk
+        # (retired only by case_status re-check).
+        "staleness_policies": {
+            "Summit Sheriff Sale (RealAuction)": "full_rescan",
+            "Akron Legal News": "full_rescan",
+            "Summit County Land Bank": "full_rescan",
+            "Summit Probate Court": "cursor",
+        },
+        # Per-source public-site + role metadata for /api/v1/sources. (url, category).
+        "source_meta": {
+            "Summit County Parcels (GIS)": (
+                "https://scgis.summitoh.net/hosted/rest/services/parcels_web_GEODATA_Tax_Parcels/FeatureServer/0",
+                "registry",
+            ),
+            "Summit Sheriff Sale (RealAuction)": ("https://summit.sheriffsaleauction.ohio.gov/", "deal"),
+            "Akron Legal News": ("https://www.akronlegalnews.com/notices/sheriff_sale_abstracts", "deal"),
+            "Summit Probate Court": ("https://probate.summitoh.net/eservices/home.page.2", "deal"),
+            "Summit County Land Bank": ("https://summit-county-oh-publicity.tolemi.com/", "deal"),
+            "Summit Delinquent Tax": (
+                "https://fiscaloffice.summitoh.net/index.php/documents-a-forms/finish/10-cama/282-sc720delq",
+                "signal",
+            ),
+            "Summit Foreclosure Filings (ALN)": ("https://www.akronlegalnews.com/notices/foreclosures", "signal"),
+            # Pre-distress LEADS (surface_distress.py) — category 'lead' groups them under Pre-Distress.
+            "Summit Tax Delinquent (Lead)": ("https://fiscaloffice.summitoh.net/index.php/property-search", "lead"),
+            "Summit Foreclosure Filing (Lead)": ("https://www.akronlegalnews.com/notices/foreclosures", "lead"),
+        },
+        # Summit probate case numbers encode the filing year as the first 4 chars
+        # ('2026 ES 00449'). The transfer guard pulls the year via substring(1,4) and
+        # the regex identifies a Summit probate case (run.py::_transfer_predicate).
+        "probate_transfer_rule": {
+            "case_regex": r"^[0-9]{4} ES",
+            "filing_year_substr": (1, 4),
+        },
+        # OH sale is FINAL at court confirmation — no statutory owner redemption window.
+        "redemption_windows": None,
+        # Live cross-verify endpoints (scripts/playwright_source_check.py reads URLs from here).
+        "verifier_endpoints": {
+            "gis_query": (
+                "https://scgis.summitoh.net/hosted/rest/services/"
+                "parcels_web_GEODATA_Tax_Parcels/FeatureServer/0/query"
+            ),
+            "realauction_base": "https://summit.sheriffsaleauction.ohio.gov/",
+            "landbank_graphql": "https://cg.tolemi.com/q",
+            "aln_base": "https://www.akronlegalnews.com/notices/sheriff_sale_abstracts",
+            "delq_url": "https://fiscaloffice.summitoh.net/index.php/documents-a-forms/finish/10-cama/282-sc720delq",
+        },
+        "registry_link": registry_link,
+        "registry_label": "Summit County Fiscal Office — Property Search",
+        "registry_search_hint": (
+            "Opens the Summit Fiscal Office property search — type the 7-digit parcel number "
+            "(or the street address) to pull the current-owner record. The GIS Tax Parcels "
+            "layer is the machine authority behind our stored owner."
+        ),
+        "registry_look_for": (
+            "(1) Owner name on the Fiscal record should match our stored owner. "
+            "(2) Situs address should match our stored address. "
+            "(3) The most recent transfer/sale date is our last_sale_date — a transfer at-or-after "
+            "a probate case's filing year (or after we first listed) means the property already sold; "
+            "the _mark_transferred_listings guard removes such listings automatically."
+        ),
+        "source_link": source_link,
+        "offmarket_links": offmarket_links,
+        "verification_guide": verification_guide,
+    }
+
+
 # The market registry. To add a market: implement _make_<market>_market() and add it here.
 MARKETS: dict[str, dict] = {
     "cuyahoga": _make_cuyahoga_market(),
     "shelby": _make_shelby_market(),
+    "summit": _make_summit_market(),
 }
 
 
@@ -609,6 +835,19 @@ MARKET_SCRAPERS: dict[str, dict] = {
         "deal_and_signal": [
             "shelby_tax_sale", "shelby_foreclosure", "shelby_delinquent_tax",
             "shelby_county_landbank", "shelby_mmlba", "shelby_probate", "shelby_evictions",
+        ],
+    },
+    "summit": {
+        # 261K-parcel GIS sweep is too heavy for the 3h run → own weekly cron (--site summit_parcels).
+        "registry": "summit_parcels",
+        "registry_in_full_run": False,
+        "deal_and_signal": [
+            "summit_realauction",     # mortgage (Fri) + tax (Tue) foreclosure — ONE file, two signal_types
+            "summit_legalnews",       # Akron Legal News sheriff-sale cross-check / enrich
+            "summit_probate",         # Summit Probate Court (CourtView eServices)
+            "summit_landbank",        # Summit County Land Bank (Tolemi GraphQL)
+            "summit_delinquent_tax",  # SC720_DELQ certified-delinquent SIGNAL (pre-distress lever)
+            "summit_foreclosure_filings",  # ALN Common Pleas foreclosure-FILING SIGNAL (pre-distress)
         ],
     },
 }

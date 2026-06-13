@@ -228,6 +228,12 @@ def normalize_parcel_number(raw: str | None) -> str | None:
         Compact: '11019068'    (Cleveland Open Data / code violations)
       Detection: purely numeric after stripping non-digits, 8 digits → Cuyahoga.
 
+    SUMMIT COUNTY (OH / Akron) — canonical form: 7-digit zero-padded numeric
+      string (e.g. '6700526', '0101379', '2400024'). Leading zeros are load-bearing.
+      Fiscal-office DISPLAY inserts a dash after digit 2 ('67-08383' on RealAuction /
+      Akron Legal News); the dash is stripped. Distinct from Cuyahoga (always 8 digits)
+      and Shelby (>= 10 digits, or alpha / whitespace). Detection: no letters + <= 7 digits.
+
     SHELBY COUNTY (TN / Memphis) — canonical form: 14-char alphanumeric
       (e.g. '07204700000160').
 
@@ -276,9 +282,10 @@ def normalize_parcel_number(raw: str | None) -> str | None:
       return; if you only have PAID for an alpha-MAP parcel, use the spaced
       PARCELID from ReGIS or the Alt_Parcel from the tax CSV instead.
 
-    Detection logic:
+    Detection logic (ORDER MATTERS — most specific first):
       - Matches DDD-NN-NNN exactly → Cuyahoga (idempotent).
       - Purely numeric after strip, 8 digits → Cuyahoga compact.
+      - No letters + <= 7 digits after strip → Summit (zero-pad to 7).
       - Exactly 14 alphanumeric chars, no spaces → already canonical (idempotent).
       - Contains internal whitespace (two non-space groups) → Shelby spaced form.
       - Purely numeric, 10–11 digits → Shelby PAID compact (numeric-MAP only).
@@ -296,6 +303,20 @@ def normalize_parcel_number(raw: str | None) -> str | None:
     digits_only = re.sub(r"\D", "", stripped)
     if len(digits_only) == 8:
         return f"{digits_only[:3]}-{digits_only[3:5]}-{digits_only[5:]}"
+
+    # ── Summit County (OH / Akron): 7-digit zero-padded numeric ──────────────
+    # Single canonical form: 7-digit zero-padded STRING (e.g. '6700526', '0101379',
+    # '2400024'). LEADING ZEROS ARE LOAD-BEARING — string-compare only; an int-cast
+    # ('0101379' -> 101379) breaks the spine join. The Fiscal Office DISPLAY form
+    # inserts a dash after digit 2 ('67-08383' on RealAuction/Akron Legal News);
+    # the non-digit strip above already removed it, so '67-08383' -> '6708383'.
+    # DETECTION is unambiguous within the live market set: a Summit parcel has NO
+    # letters and <= 7 digits, whereas Cuyahoga (OH) is always exactly 8 digits
+    # (handled above) and every Shelby (TN) form is either >= 10 digits (PAID 10-11,
+    # 14-char canonical) or contains letters / internal whitespace (handled below).
+    # zfill(7) is defensive for any source that drops a leading zero ('101379').
+    if not re.search(r"[A-Za-z]", stripped) and 1 <= len(digits_only) <= 7:
+        return digits_only.zfill(7)
 
     # ── Shelby County (TN): 14-char canonical ────────────────────────────────
     # Already canonical: exactly 14 alphanumeric chars, no spaces or hyphens.

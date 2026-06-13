@@ -70,6 +70,13 @@ from app.scrapers.fiscal_officer import (  # noqa: E402
     upsert_parcels as _fo_upsert_parcels,
 )
 from app.scrapers.shelby_parcels import ShelbyParcelsScraper  # noqa: E402
+from app.scrapers.summit_parcels import SummitParcelsScraper  # noqa: E402
+from app.scrapers.summit_realauction import SummitRealAuctionScraper  # noqa: E402
+from app.scrapers.summit_legalnews import SummitLegalNewsScraper  # noqa: E402
+from app.scrapers.summit_probate import SummitProbateScraper  # noqa: E402
+from app.scrapers.summit_landbank import SummitLandBankScraper  # noqa: E402
+from app.scrapers.summit_delinquent_tax import SummitDelinquentTaxScraper  # noqa: E402
+from app.scrapers.summit_foreclosure_filings import SummitForeclosureFilingsScraper  # noqa: E402
 from app.scrapers.shelby_tax_sale import ShelbyTaxSaleScraper  # noqa: E402
 from app.scrapers.shelby_foreclosure import ShelbyForeclosureScraper  # noqa: E402
 from app.scrapers.shelby_delinquent_tax import ShelbyDelinquentTaxScraper  # noqa: E402
@@ -100,6 +107,7 @@ _SCRAPERS: dict[str, type] = {
     "forfeited_land": ForfeitedLandScraper,   # tax-deed listings (ArcGIS)
     "delinquent_tax": DelinquentTaxScraper,   # tax-distress SIGNAL (ArcGIS)
     "shelby_parcels": ShelbyParcelsScraper,   # Shelby County (TN) registry spine (ArcGIS)
+    "summit_parcels": SummitParcelsScraper,   # Summit County (OH / Akron) registry spine (ArcGIS)
     "shelby_tax_sale": ShelbyTaxSaleScraper,           # Shelby (TN) tax-deed pre-sale catalog (CSV)
     "shelby_foreclosure": ShelbyForeclosureScraper,    # Shelby (TN) mortgage/trustee-sale foreclosure (tnforeclosurenotices + auction.com)
     "shelby_delinquent_tax": ShelbyDelinquentTaxScraper,  # Shelby (TN) tax-delinquent SIGNAL (Trustee lawsuit XLSX)
@@ -107,6 +115,12 @@ _SCRAPERS: dict[str, type] = {
     "shelby_mmlba": MemphisMMLBAScraper,               # Memphis (TN) City land bank MMLBA (Airtable)
     "shelby_probate": ShelbyProbateScraper,            # Shelby (TN) probate estate cases (CourtConnect, precision-first)
     "shelby_evictions": ShelbyEvictionsScraper,        # Shelby (TN) eviction filings SIGNAL (Data Midsouth)
+    "summit_realauction": SummitRealAuctionScraper,    # Summit (OH) sheriff sale — mortgage (Fri) + tax (Tue), 2 signal_types
+    "summit_legalnews": SummitLegalNewsScraper,        # Summit (OH) Akron Legal News sheriff-sale cross-check
+    "summit_probate": SummitProbateScraper,            # Summit (OH) probate estate cases (CourtView/Wicket, cursor)
+    "summit_landbank": SummitLandBankScraper,          # Summit (OH) County Land Bank (Tolemi GraphQL)
+    "summit_delinquent_tax": SummitDelinquentTaxScraper,  # Summit (OH) certified-delinquent tax SIGNAL (pre-distress)
+    "summit_foreclosure_filings": SummitForeclosureFilingsScraper,  # Summit (OH) foreclosure-FILING SIGNAL (pre-distress, ALN)
 }
 
 
@@ -193,6 +207,11 @@ async def _run_scraper(
         # ~353K parcels = ~707 pages = ~12 minutes. max_parcels=None = full sweep.
         # For a test run: ShelbyParcelsScraper(max_parcels=500)
         scraper = scraper_cls()
+    elif scraper_key == "summit_parcels":
+        # Full sweep of Summit County (OH) GIS Tax Parcels at 2000/page.
+        # 261K parcels = ~131 pages. max_parcels=None = full sweep.
+        # For a test run: SummitParcelsScraper(max_parcels=500)
+        scraper = scraper_cls()
     elif scraper_key == "probate":
         # Probate manages its own cursor (tranchi.probate_cursor) and signal
         # writes internally, so it needs the pool + dry_run flag at construction.
@@ -216,6 +235,11 @@ async def _run_scraper(
         # SignalScraper, but resolves property addresses to spine parcels (no parcel in
         # source), so it needs the pool. Output flows through the signal path below.
         scraper = scraper_cls(pool=pool, dry_run=dry_run)
+    elif scraper_key == "summit_probate":
+        # Manages its own cursor (tranchi.summit_probate_cursor) and resolves the decedent
+        # address → Summit parcel against the spine (market='summit'), so it needs the pool.
+        # Drives CourtView eServices (Wicket single-use tokens). Plain ListingScraper out.
+        scraper = scraper_cls(pool=pool, dry_run=dry_run)
     else:
         scraper = scraper_cls()
     site_name = scraper.site_name
@@ -224,7 +248,7 @@ async def _run_scraper(
     try:
         logger.info("Starting scraper: %s", site_name)
 
-        if scraper_key in ("fiscal_officer", "shelby_parcels"):
+        if scraper_key in ("fiscal_officer", "shelby_parcels", "summit_parcels"):
             # ── Registry path ──────────────────────────────────────────────────
             # Registry scrapers are parcel identity spines, not deal-listing feeds.
             # We populate tranchi.parcels only; tranchi.listings is never touched.
