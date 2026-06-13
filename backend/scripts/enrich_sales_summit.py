@@ -149,24 +149,28 @@ async def run(dry_run: bool) -> int:
                 return 0
 
             # Bulk path: stage into a TEMP table, then one UPDATE...FROM scoped to market.
-            await conn.execute(
-                "CREATE TEMP TABLE _summit_sales (parcel_number text PRIMARY KEY, "
-                "sale_date date, price numeric) ON COMMIT DROP"
-            )
-            await conn.copy_records_to_table("_summit_sales", records=records,
-                                             columns=["parcel_number", "sale_date", "price"])
-            tag = await conn.execute(
-                """
-                UPDATE tranchi.parcels p
-                   SET last_sale_date  = t.sale_date,
-                       last_sale_price = COALESCE(t.price, p.last_sale_price)
-                  FROM _summit_sales t
-                 WHERE p.parcel_number = t.parcel_number
-                   AND p.market = $1
-                   AND (p.last_sale_date IS DISTINCT FROM t.sale_date)
-                """,
-                _MARKET,
-            )
+            # MUST run inside ONE transaction — asyncpg auto-commits each statement, and an
+            # ON COMMIT DROP temp table would otherwise vanish before the COPY (the bug that
+            # made the first run a no-op). The whole create→copy→update is one transaction.
+            async with conn.transaction():
+                await conn.execute(
+                    "CREATE TEMP TABLE _summit_sales (parcel_number text PRIMARY KEY, "
+                    "sale_date date, price numeric) ON COMMIT DROP"
+                )
+                await conn.copy_records_to_table("_summit_sales", records=records,
+                                                 columns=["parcel_number", "sale_date", "price"])
+                tag = await conn.execute(
+                    """
+                    UPDATE tranchi.parcels p
+                       SET last_sale_date  = t.sale_date,
+                           last_sale_price = COALESCE(t.price, p.last_sale_price)
+                      FROM _summit_sales t
+                     WHERE p.parcel_number = t.parcel_number
+                       AND p.market = $1
+                       AND (p.last_sale_date IS DISTINCT FROM t.sale_date)
+                    """,
+                    _MARKET,
+                )
             updated = int((tag or "0").split()[-1])
             covered = await conn.fetchval(
                 "SELECT count(*) FROM tranchi.parcels WHERE market=$1 AND last_sale_date IS NOT NULL",
