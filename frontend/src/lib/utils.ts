@@ -71,19 +71,24 @@ export function sourceBadgeClass(site: string): string {
 }
 
 // ─── Markets ────────────────────────────────────────────────────────────────
-// The dashboard now serves two markets. Filtering keys on property_county
+// The dashboard serves three markets. Filtering keys on property_county
 // (the API _build_where does an ILIKE on l.property_county).
 export interface Market { label: string; county: string; }
 export const MARKETS: Market[] = [
   { label: 'Cuyahoga (OH)', county: 'Cuyahoga' },
   { label: 'Shelby–Memphis (TN)', county: 'Shelby' },
+  { label: 'Summit–Akron (OH)', county: 'Summit' },
 ];
 
-// Scope a source_site to a market by county. Shelby/Memphis sources name the county
-// or city; everything else is treated as the Cuyahoga (OH) market.
+// Scope a source_site to a market by name. Shelby/Memphis sources name the county
+// or city; Summit/Akron sources name Summit or Akron; everything else is Cuyahoga.
+// (No Cuyahoga or Shelby source name contains 'Summit'/'Akron', so this stays disjoint.)
 export function sourceInCounty(site: string, county: string): boolean {
   const isShelby = site.includes('Shelby') || site.includes('Memphis') || site.includes('MMLBA');
-  return county === 'Shelby' ? isShelby : !isShelby;
+  const isSummit = site.includes('Summit') || site.includes('Akron');
+  if (county === 'Shelby') return isShelby;
+  if (county === 'Summit') return isSummit;
+  return !isShelby && !isSummit;  // Cuyahoga = neither
 }
 
 // External "verify" link per market. Shelby's universal verifier is the County Trustee
@@ -108,6 +113,15 @@ export function buildVerifyLink(
         href: `https://apps2.shelbycountytrustee.com/search?search=${encodeURIComponent(address)}`,
       };
     }
+  }
+  if (county === 'Summit') {
+    // Summit's current-owner authority is the Fiscal Office property search (no stable
+    // per-parcel deep-link param confirmed — opens the search page; the parcel/source
+    // links from the API cover the per-listing source verification).
+    return {
+      label: 'Find on Summit Fiscal Office',
+      href: 'https://fiscaloffice.summitoh.net/index.php/property-search',
+    };
   }
   return null;
 }
