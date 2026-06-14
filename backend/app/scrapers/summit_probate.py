@@ -728,6 +728,29 @@ async def _upsert_signal(
 # RawListing builder
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _surname_mismatch(decedent_name: str | None, owner_name: str | None) -> bool:
+    """True when the current owner's surname does NOT match the decedent's.
+
+    The address-anchor join confirms the decedent LIVED at the parcel, not that they
+    OWNED it. If the current owner's surname is absent from the decedent's surname, it's
+    a likely MIS-JOIN (decedent rented / never owned) — a parcel that genuinely sold out
+    of the estate would already be flipped to 'transferred' by the post-run transfer
+    guard, so an ACTIVE owner-mismatch is the never-owned case. Decedent comes as
+    'Last, First M' (CourtView); owner as 'LAST FIRST M' or a company. We test whether
+    the decedent surname appears anywhere in the owner string (so heirs who share the
+    surname — 'Brown, David' -> owner 'BROWN KEVIN' — correctly do NOT trip it).
+    """
+    if not decedent_name or not owner_name:
+        return False
+    surname = decedent_name.split(",")[0].strip().split()
+    if not surname:
+        return False
+    last = surname[0].upper()
+    if len(last) < 2:
+        return False
+    return last not in owner_name.upper()
+
+
 def _build_listing(
     *,
     parcel_number: str,
@@ -1032,6 +1055,23 @@ class SummitProbateScraper(ListingScraper):
                         # Use situs from spine if available, else fall back to parsed address
                         situs = p.get("situs_address") or f"{street}, {city or 'Akron'}, OH"
 
+                        # OWNER-vs-DECEDENT check: address-anchor proves the decedent lived
+                        # here, not that the estate owns it. If the current owner's surname
+                        # doesn't match the decedent (and it's still active, so not a post-
+                        # filing sale the transfer-guard would catch), demote to 'review' —
+                        # VISIBLE but flagged (the dashboard renders the match_confidence
+                        # badge + "confirm the decedent matches the current owner"), so a
+                        # likely mis-join is obvious to a reviewer instead of reading as
+                        # 'confirmed'. Never hard-hidden (heirs/trusts/LLCs legitimately
+                        # differ — this is a REVIEW prompt, not a kill).
+                        listing_tier = tier
+                        if _surname_mismatch(decedent_name, p.get("owner_name")):
+                            listing_tier = "review"
+                            logger.info(
+                                "SummitProbate: case %s parcel %s owner %r != decedent %r — flagging REVIEW (possible mis-join)",
+                                case_num, norm_parcel, p.get("owner_name"), decedent_name,
+                            )
+
                         listing = _build_listing(
                             parcel_number=norm_parcel,
                             situs_address=situs,
@@ -1044,7 +1084,7 @@ class SummitProbateScraper(ListingScraper):
                             fiduciary_name=fiduciary_name,
                             action_type=action_type,
                             match_method="address_anchor",
-                            match_confidence=tier,
+                            match_confidence=listing_tier,
                             match_score=score,
                         )
                         all_listings.append(listing)

@@ -64,7 +64,7 @@ GENERAL_GUIDE = (
 # PROBATE_VISIBLE_CONFIDENCE: a probate listing is shown only when its decedent→parcel
 #   join is in this set (precision-first; 'unverified'/NULL are mis-join risks, hidden).
 PROBATE_CLOSED_KEYWORDS = ("closed", "disposed", "terminated", "dismissed")
-PROBATE_VISIBLE_CONFIDENCE = ("confirmed", "probable")
+PROBATE_VISIBLE_CONFIDENCE = ("confirmed", "probable", "review")
 
 
 # ---------------------------------------------------------------- URL helpers
