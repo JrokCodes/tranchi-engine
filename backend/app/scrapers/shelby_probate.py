@@ -66,6 +66,7 @@ except Exception:  # pragma: no cover
     asyncpg = None  # type: ignore
 
 from app.scrapers.base import ListingScraper
+from app.scrapers._probate_owner import surname_mismatch as _surname_mismatch
 from app.scrapers.db import canonical_address, normalize_parcel_number
 from app.scrapers.fiscal_officer import _name_confidence, _normalize_name, _levenshtein, _STRONG_TOKEN
 from app.scrapers.models import RawListing
@@ -569,6 +570,17 @@ class ShelbyProbateScraper(ListingScraper):
                         if ah is not None:
                             method = "composite" if nh else "address_anchor"
                             tier, score = "confirmed", (0.98 if nh else 0.95)
+                            # Owner-vs-decedent mis-join guard (cross-market, mirrors
+                            # summit_probate): address-anchor proves the decedent lived
+                            # here, not that the estate owns it. Surname mismatch -> demote
+                            # to 'review' (VISIBLE + badged), never hide (heirs/trusts/LLCs
+                            # legitimately differ).
+                            if _surname_mismatch(decedent, ah.get("owner_name")):
+                                tier = "review"
+                                logger.info(
+                                    "ShelbyProbate: case %s parcel %s owner %r != decedent %r — REVIEW (possible mis-join)",
+                                    case_id, parcel, ah.get("owner_name"), decedent,
+                                )
                         else:  # name-only — precision gates
                             if name_ambiguous:
                                 skipped_ambiguous += 1

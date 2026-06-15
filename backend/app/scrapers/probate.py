@@ -94,6 +94,7 @@ from app.scrapers.models import RawListing
 from app.scrapers.proware_client import ProwareSession
 from app.scrapers.user_agents import random_ua
 from app.scrapers._time import today_et
+from app.scrapers._probate_owner import surname_mismatch as _surname_mismatch
 from app.scrapers.fiscal_officer import search_by_address, search_by_owner, ParcelMatch, upsert_parcels
 
 logger = logging.getLogger(__name__)
@@ -717,6 +718,21 @@ class ProbateScraper(ListingScraper):
                     name_match = name_hits.get(parcel_number)
                     addr_match = addr_hits.get(parcel_number)
                     match, method, tier, score = _classify_match(name_match, addr_match)
+
+                    # Owner-vs-decedent mis-join guard (cross-market, mirrors summit_probate):
+                    # an address-anchored join proves the decedent LIVED here, not that the
+                    # estate OWNS it. If the current owner's surname doesn't match the
+                    # decedent, demote to 'review' (VISIBLE + badged), never hide — heirs/
+                    # trusts/LLCs legitimately differ. Address-anchor paths only (a name-only
+                    # match trivially shares the surname).
+                    if method in ("address_anchor", "composite") and _surname_mismatch(
+                        decedent_name, match.owner_name
+                    ):
+                        tier = "review"
+                        logger.info(
+                            "Probate(Cuyahoga): case %s parcel %s owner %r != decedent %r — REVIEW (possible mis-join)",
+                            case_number, match.parcel_number, match.owner_name, decedent_name,
+                        )
 
                     if addr_match is None:  # name-only path — apply precision gates
                         if name_ambiguous:
