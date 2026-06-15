@@ -98,12 +98,21 @@ def _parse_price(s: str) -> Decimal | None:
 
 
 def _parse_date(s: str) -> date | None:
-    """'08/26/2005' -> date(2005, 8, 26); junk -> None."""
+    """'08/26/2005' -> date(2005, 8, 26); junk -> None.
+
+    Rejects IMPLAUSIBLE dates (source typos seen live: year 2525, 0953, 0210, or a
+    future date like 2026-07-05) -> None. A garbage future/absurd date would
+    otherwise sort as the 'latest' priced sale in _pick_last_sale and falsely retire
+    a live lead via the transfer guard.
+    """
     s = (s or "").strip()
     try:
-        return datetime.strptime(s, "%m/%d/%Y").date()
+        d = datetime.strptime(s, "%m/%d/%Y").date()
     except ValueError:
         return None
+    if d.year < 1900 or d > date.today():
+        return None
+    return d
 
 
 def _parse_salesbody(html_text: str) -> list[dict]:
