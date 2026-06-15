@@ -542,6 +542,50 @@ async def _dedup_cross_source_listings(pool: asyncpg.Pool) -> int:
                     END
                 """
             )
+            # SAFETY-NET (foreclosure cross-source): a NULL-parcel foreclosure row
+            # keys on normalized_address while its parcel-bearing twin keys on the
+            # parcel, so the pass above never collapses them (RealAuction<->ALN show
+            # the same sheriff sale twice). Attach the null-parcel row to the
+            # parcel-bearing canonical that shares the SAME normalized_address AND the
+            # same case (digit-core compare, so a 'CV…A' re-notice suffix or a source
+            # prefix still matches), and ONLY when exactly ONE such canonical exists.
+            # Scoped to null-parcel foreclosure rows. NEVER match on case alone — a
+            # Shelby TS#### tax-sale case covers thousands of parcels; requiring the
+            # address too means one sheriff/mortgage case = one property. Runs after
+            # the main pass each cycle (idempotent: main pass may reset the orphan to
+            # canonical-of-its-address-cluster, this re-points it).
+            await conn.execute(
+                """
+                UPDATE tranchi.listings o
+                SET duplicate_of = c.id
+                FROM tranchi.listings c
+                WHERE o.status IN ('active', 'not_listed')
+                  AND NULLIF(o.source_listing_id, '') IS NULL
+                  AND o.duplicate_of IS NULL
+                  AND o.signal_type LIKE '%foreclosure%'
+                  AND o.case_number IS NOT NULL
+                  AND o.normalized_address IS NOT NULL
+                  AND regexp_replace(o.case_number, '[^0-9]', '', 'g') <> ''
+                  AND c.status IN ('active', 'not_listed')
+                  AND NULLIF(c.source_listing_id, '') IS NOT NULL
+                  AND c.duplicate_of IS NULL
+                  AND c.case_number IS NOT NULL
+                  AND c.id <> o.id
+                  AND c.market = o.market
+                  AND c.normalized_address = o.normalized_address
+                  AND regexp_replace(c.case_number, '[^0-9]', '', 'g')
+                      = regexp_replace(o.case_number, '[^0-9]', '', 'g')
+                  AND (
+                        SELECT count(*) FROM tranchi.listings c2
+                        WHERE c2.status IN ('active', 'not_listed')
+                          AND NULLIF(c2.source_listing_id, '') IS NOT NULL
+                          AND c2.duplicate_of IS NULL
+                          AND c2.normalized_address = o.normalized_address
+                          AND regexp_replace(c2.case_number, '[^0-9]', '', 'g')
+                              = regexp_replace(o.case_number, '[^0-9]', '', 'g')
+                      ) = 1
+                """
+            )
             marked = await conn.fetchval(
                 """
                 SELECT COUNT(*)

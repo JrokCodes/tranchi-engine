@@ -312,11 +312,31 @@ function ListingRow({ item, index, onClick }: RowProps) {
         <ListingThumb url={item.street_view_url} />
       </td>
 
-      {/* Address + county */}
+      {/* Address + parcel·owner + county.
+          The parcel·owner sub-line disambiguates distinct parcels that share a
+          non-distinctive street (e.g. many lots on "Cordova Ave", or land-bank "0"
+          addresses) so they stop reading as duplicates. Data already served by the
+          API (source_listing_id = parcel, owner_name). */}
       <td className="px-4">
         <p className="text-[13px] font-medium text-(--color-ink) group-hover:text-(--color-navy) transition-colors truncate max-w-[240px]">
           {item.property_address}
+          {item.address_status === 'no_street_number' && (
+            <span
+              className="ml-1.5 inline-flex items-center px-1.5 py-px rounded-full text-[10px] font-medium bg-(--color-bg-elevated) text-(--color-muted) border border-(--color-border) align-middle"
+              title="No house number on file — verify this parcel by parcel number, not street address"
+            >
+              no #
+            </span>
+          )}
         </p>
+        {item.source_listing_id && (
+          <p className="text-[11px] text-(--color-muted) truncate max-w-[240px]">
+            parcel {item.source_listing_id}
+            {item.owner_name && item.owner_name !== '(Owner not found)' && (
+              <span> · {item.owner_name}</span>
+            )}
+          </p>
+        )}
         <p className="text-[11px] text-(--color-muted)">{item.property_county} Co.</p>
       </td>
 

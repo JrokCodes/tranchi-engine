@@ -293,6 +293,29 @@ def _parse_abstract_text(text: str, notice_id: str, sale_date: date | None) -> d
 # Detail page parsing
 # ─────────────────────────────────────────────────────────────────────────────
 
+_PARCEL_SPLIT_RE = re.compile(r"\s*(?:&|,|/|\band\b)\s*", re.I)
+
+
+def _normalize_parcels(parcel_raw: str | None) -> list[str]:
+    """Normalize a possibly multi-parcel ALN string to canonical parcels.
+
+    ALN occasionally lists several parcels for one sale ('68-48189 & 68-48190').
+    Passing the combined string to normalize_parcel_number yields garbage (14 digits
+    -> no Summit 7-digit match), so split on & / , / 'and' first and normalize each.
+    The first parcel becomes source_listing_id (the cross-source dedup key) —
+    RealAuction lists the same sale by its primary parcel, so first-parcel keying
+    lets the existing parcel dedup collapse the RealAuction<->ALN pair.
+    """
+    if not parcel_raw:
+        return []
+    out: list[str] = []
+    for part in _PARCEL_SPLIT_RE.split(parcel_raw):
+        norm = normalize_parcel_number(part.strip())
+        if norm and norm not in out:
+            out.append(norm)
+    return out
+
+
 def _parse_detail_page(html: str) -> dict:
     """Parse a /notices/detail/<id> page.
 
@@ -311,10 +334,15 @@ def _parse_detail_page(html: str) -> dict:
     """
     soup = BeautifulSoup(html, "html.parser")
 
-    # Parcel — semantic ID
+    # Parcel — semantic ID. May be a multi-parcel string ("68-48189 & 68-48190");
+    # split + normalize each (the combined string would normalize to garbage) and
+    # key dedup on the first. A parcel on every ALN row lets the existing parcel
+    # dedup collapse the RealAuction<->ALN duplicate instead of address-vs-parcel
+    # keying never matching.
     parcel_tag = soup.find(id="notice_parcel_number")
     parcel_raw = parcel_tag.get_text(strip=True) if parcel_tag else None
-    parcel_normalized = normalize_parcel_number(parcel_raw)
+    parcel_list = _normalize_parcels(parcel_raw)
+    parcel_normalized = parcel_list[0] if parcel_list else None
 
     # Full address components — each has its own ID
     addr_tag = soup.find(id="notice_address")
