@@ -58,7 +58,12 @@ _SALES_FS = (
     "assessor_property_sales_view/FeatureServer/0"
 )
 
-_PAGE_SIZE = 2000
+# Detroit Open Data layers (parcel_file_current AND assessor_property_sales_view) cap at
+# maxRecordCount=1000. The shared arcgis_client stops paginating when a page returns FEWER
+# than batch_size, so batch_size MUST be <= the server cap — a batch of 2000 gets 1000 back,
+# looks like the last page, and silently truncates the sweep to 1 page (caught on first EC2
+# run: spine loaded 1000 of 378K). Keep this at 1000.
+_PAGE_SIZE = 1000
 
 _PARCEL_FIELDS = ",".join([
     "parcel_id",
