@@ -688,14 +688,17 @@ def _build_layer1_shelby(r: asyncpg.Record, sig: str, source_site: str,
 # ----------------------------------------------------------------- Fetching
 
 
+# INVARIANT — sample scope is l.market, NOT property_state. Cuyahoga and Summit are
+# both OH; a state filter leaks Cuyahoga rows into a Summit sample (and vice-versa).
+# market_filter (market_config) pins each sample to its own market column.
 async def _fetch_signal(conn, signal: str, limit: int, market: dict) -> list:
-    state_filter = market["state_filter"]
+    market_filter = market["market_filter"]
     return await conn.fetch(
         f"""
         SELECT {_SELECT_COLS}
         {_FROM_JOIN}
         WHERE l.status = 'active' AND l.duplicate_of IS NULL
-          AND {state_filter}
+          AND {market_filter}
           AND l.signal_type = $1
         ORDER BY random()
         LIMIT {int(limit)}
@@ -705,13 +708,13 @@ async def _fetch_signal(conn, signal: str, limit: int, market: dict) -> list:
 
 
 async def _fetch_random(conn, limit: int, exclude_ids: set, market: dict) -> list:
-    state_filter = market["state_filter"]
+    market_filter = market["market_filter"]
     rows = await conn.fetch(
         f"""
         SELECT {_SELECT_COLS}
         {_FROM_JOIN}
         WHERE l.status = 'active' AND l.duplicate_of IS NULL
-          AND {state_filter}
+          AND {market_filter}
         ORDER BY random()
         LIMIT {int(limit) * 4}
         """,

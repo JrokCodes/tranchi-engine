@@ -217,7 +217,7 @@ def _make_cuyahoga_market() -> dict:
     return {
         "db": "tranchi",
         "state": "OH",
-        "state_filter": "l.property_state = 'OH'",
+        "market_filter": "l.market = 'cuyahoga'",  # sample scope: by market, NOT state (two OH markets coexist)
         # Pre-distress lead surfacing (surface_distress.py). `distress_lead_county` is the
         # county label stamped on lead rows. `distress_lead_rules` (per signal_type):
         #   address_source 'payload' — Cuyahoga signal payloads carry the FULL situs
@@ -466,7 +466,7 @@ def _make_shelby_market() -> dict:
     return {
         "db": "tranchi",
         "state": "TN",
-        "state_filter": "l.property_state = 'TN'",
+        "market_filter": "l.market = 'shelby'",
         # Pre-distress lead surfacing (surface_distress.py). Shelby sources the lead address
         # from the parcel SPINE (situs_address; the signal payload location is street-only)
         # and surfaces EVERY fresh signal (gate_sql=None) — the byte-for-byte prior behavior,
@@ -694,7 +694,7 @@ def _make_summit_market() -> dict:
     return {
         "db": "tranchi",
         "state": "OH",
-        "state_filter": "l.property_state = 'OH'",
+        "market_filter": "l.market = 'summit'",
         # Pre-distress lead surfacing (surface_distress.py). Summit sources the lead ADDRESS
         # from the parcel SPINE (situs_address) — the SC720_DELQ tape's PROPERTY_ADDRESS is
         # ~26% blank, and its TAXBILL_ADDRESS is the OWNER MAILING address, not the situs; the
