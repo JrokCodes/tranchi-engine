@@ -71,6 +71,13 @@ from app.scrapers.fiscal_officer import (  # noqa: E402
 )
 from app.scrapers.shelby_parcels import ShelbyParcelsScraper  # noqa: E402
 from app.scrapers.summit_parcels import SummitParcelsScraper  # noqa: E402
+from app.scrapers.wayne_parcels import WayneParcelsScraper  # noqa: E402
+from app.scrapers.wayne_foreclosure import WayneForeclosureScraper  # noqa: E402
+from app.scrapers.wayne_dlba import WayneDLBAScraper  # noqa: E402
+from app.scrapers.wayne_wclb import WayneCountyLandBankScraper  # noqa: E402
+from app.scrapers.wayne_tax_auction import WayneTaxAuctionScraper  # noqa: E402
+from app.scrapers.wayne_blight import WayneBlightScraper  # noqa: E402
+from app.scrapers.wayne_delinquent_tax import WayneDelinquentTaxScraper  # noqa: E402
 from app.scrapers.summit_realauction import SummitRealAuctionScraper  # noqa: E402
 from app.scrapers.summit_legalnews import SummitLegalNewsScraper  # noqa: E402
 from app.scrapers.summit_probate import SummitProbateScraper  # noqa: E402
@@ -108,6 +115,13 @@ _SCRAPERS: dict[str, type] = {
     "delinquent_tax": DelinquentTaxScraper,   # tax-distress SIGNAL (ArcGIS)
     "shelby_parcels": ShelbyParcelsScraper,   # Shelby County (TN) registry spine (ArcGIS)
     "summit_parcels": SummitParcelsScraper,   # Summit County (OH / Akron) registry spine (ArcGIS)
+    "wayne_parcels": WayneParcelsScraper,     # Wayne County (MI / Detroit) registry spine + Property-Sales overlay (ArcGIS)
+    "wayne_foreclosure": WayneForeclosureScraper,  # Wayne (MI) mortgage foreclosure (mipublicnotices area=82 + auction.com), redemption lifecycle
+    "wayne_dlba": WayneDLBAScraper,                # Detroit Land Bank (buildingdetroit + ArcGIS) — structures + buyable lots
+    "wayne_wclb": WayneCountyLandBankScraper,      # Wayne County Land Bank (ePropertyPlus, out-county)
+    "wayne_tax_auction": WayneTaxAuctionScraper,   # Wayne Treasurer tax-foreclosure auction — SEASONAL, ships dormant
+    "wayne_blight": WayneBlightScraper,            # Detroit blight tickets SIGNAL (DELTA on ticket_updated_at)
+    "wayne_delinquent_tax": WayneDelinquentTaxScraper,  # Wayne Treasurer forfeiture-PDF SIGNAL (pre-distress)
     "shelby_tax_sale": ShelbyTaxSaleScraper,           # Shelby (TN) tax-deed pre-sale catalog (CSV)
     "shelby_foreclosure": ShelbyForeclosureScraper,    # Shelby (TN) mortgage/trustee-sale foreclosure (tnforeclosurenotices + auction.com)
     "shelby_delinquent_tax": ShelbyDelinquentTaxScraper,  # Shelby (TN) tax-delinquent SIGNAL (Trustee lawsuit XLSX)
@@ -180,7 +194,7 @@ async def _run_scraper(
     #   fiscal_officer:  does not accept last_run_date (full A-Z sweep each run)
     # Scrapers that manage their own state (probate cursor) or do full pulls
     # by design (landbank, sheriff) are constructed with no arguments as before.
-    _DELTA_PULL_SCRAPERS = {"code_violations"}
+    _DELTA_PULL_SCRAPERS = {"code_violations", "wayne_blight"}
     if scraper_key in _DELTA_PULL_SCRAPERS:
         # Peek at the site_name by instantiating briefly — cheaper than a separate
         # registry. Alternatively derive site_name from a mock instance.
@@ -212,6 +226,15 @@ async def _run_scraper(
         # 261K parcels = ~131 pages. max_parcels=None = full sweep.
         # For a test run: SummitParcelsScraper(max_parcels=500)
         scraper = scraper_cls()
+    elif scraper_key == "wayne_parcels":
+        # Full sweep of the Detroit parcel roll (378K, ~190 pages) + the Property-Sales
+        # overlay (509K ordered DESC) folded into the spine for the transferred-guard.
+        # max_parcels=None = full sweep. For a test run: WayneParcelsScraper(max_parcels=500).
+        scraper = scraper_cls()
+    elif scraper_key == "wayne_foreclosure":
+        # Resolves notice/auction street addresses to Wayne parcels against tranchi.parcels
+        # (market='wayne', house# + zip + street), so it needs the pool. Plain ListingScraper.
+        scraper = scraper_cls(pool=pool, dry_run=dry_run)
     elif scraper_key == "probate":
         # Probate manages its own cursor (tranchi.probate_cursor) and signal
         # writes internally, so it needs the pool + dry_run flag at construction.
@@ -248,7 +271,7 @@ async def _run_scraper(
     try:
         logger.info("Starting scraper: %s", site_name)
 
-        if scraper_key in ("fiscal_officer", "shelby_parcels", "summit_parcels"):
+        if scraper_key in ("fiscal_officer", "shelby_parcels", "summit_parcels", "wayne_parcels"):
             # ── Registry path ──────────────────────────────────────────────────
             # Registry scrapers are parcel identity spines, not deal-listing feeds.
             # We populate tranchi.parcels only; tranchi.listings is never touched.
@@ -486,6 +509,13 @@ async def _mark_stale_listings(
                   -- the redemption post-passes + Chancery confirmation reader, not staleness.
                   AND NOT (signal_type = 'tax_deed'
                            AND (redemption_status = 'pending' OR sale_date < CURRENT_DATE))
+                  -- MI redemption (MCL 600.3240): a foreclosed Wayne mortgage notice DROPS
+                  -- OFF the mipublicnotices feed after the sale, but the owner can still
+                  -- redeem for 6 months — so absence != delisted during that window. Keep
+                  -- in-redemption rows visible for 180 days past sale_date (market-scoped so
+                  -- OH mortgage_foreclosure, where the sale is final, is unaffected).
+                  AND NOT (market = 'wayne' AND signal_type = 'mortgage_foreclosure'
+                           AND sale_date >= CURRENT_DATE - INTERVAL '180 days')
                 """,
                 run_start,
                 successful_sources,
@@ -522,7 +552,12 @@ async def _dedup_cross_source_listings(pool: asyncpg.Pool) -> int:
                         id,
                         COALESCE(NULLIF(source_listing_id, ''), normalized_address) AS cluster_key,
                         FIRST_VALUE(id) OVER (
-                            PARTITION BY COALESCE(NULLIF(source_listing_id, ''), normalized_address)
+                            -- market-scoped: a property lives in exactly one market, so two
+                            -- different-market rows sharing a parcel string OR a city-less
+                            -- normalized_address (e.g. a Detroit vs Memphis "100 MAIN ST"
+                            -- NULL-parcel foreclosure) must NEVER collapse cross-market. The
+                            -- safety-net pass below is already market-scoped; this matches it.
+                            PARTITION BY market, COALESCE(NULLIF(source_listing_id, ''), normalized_address)
                             ORDER BY (sale_date IS NULL), sale_date DESC NULLS LAST, first_seen_at, id
                         ) AS canonical_id
                     FROM tranchi.listings
@@ -707,6 +742,13 @@ async def _mark_expired_listings(pool: asyncpg.Pool) -> int:
                   AND NOT (signal_type = 'tax_deed'
                            AND (confirmation_order_date IS NULL
                                 OR redemption_status = 'pending'))
+                  -- MI redemption (MCL 600.3240): a Wayne mortgage-foreclosure sheriff-deed
+                  -- is NOT final at sale — residential owners redeem for 6 months. Do NOT
+                  -- expire an in-redemption row; keep it a live lead for 180 days past
+                  -- sale_date, then it expires normally. Market-scoped so OH mortgage
+                  -- foreclosure (final at sale) still expires the moment its date passes.
+                  AND NOT (market = 'wayne' AND signal_type = 'mortgage_foreclosure'
+                           AND sale_date >= CURRENT_DATE - INTERVAL '180 days')
                 """,
             )
             count = int(result.split()[-1]) if result else 0
@@ -978,6 +1020,44 @@ async def _finalize_expired_redemptions(pool: asyncpg.Pool) -> int:
         return 0
 
 
+async def _compute_mi_redemption(pool: asyncpg.Pool) -> int:
+    """Stamp the MI 6-month redemption window (MCL 600.3240) on Wayne mortgage-foreclosure rows.
+
+    Display/lifecycle companion to the market-scoped carve-outs in _mark_expired/_mark_stale.
+    MI redemption is a FLAT window keyed on sale_date (not TN's confirmation_order_date tiers):
+    redemption_ends = sale_date + 180d; redemption_status='pending' once the sale has passed
+    (the row is now IN redemption), else NULL (still pre-sale). We default ALL residential
+    foreclosures to 6 months — the 1-month abandoned case (MCL 600.3241a) is not reliably
+    detectable from the notice feed (Jayden 2026-06-16). Idempotent; touches only wayne rows.
+    """
+    try:
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                UPDATE tranchi.listings
+                SET redemption_window_days = 180,
+                    redemption_basis       = 'mi_6mo',
+                    redemption_ends        = sale_date + INTERVAL '180 days',
+                    redemption_status      = CASE WHEN sale_date < CURRENT_DATE
+                                                  THEN 'pending' ELSE NULL END,
+                    redemption_checked_at  = now()
+                WHERE market = 'wayne'
+                  AND signal_type = 'mortgage_foreclosure'
+                  -- include not_listed so a row that briefly fell off the notice feed still
+                  -- gets its redemption_ends refreshed (no stale display when it flips back).
+                  AND status IN ('active', 'not_listed')
+                  AND sale_date IS NOT NULL
+                """
+            )
+            count = int(result.split()[-1]) if result else 0
+            if count > 0:
+                logger.info("MI redemption: stamped window on %d Wayne foreclosure rows", count)
+            return count
+    except Exception as exc:
+        logger.warning("MI redemption computation failed: %s", exc)
+        return 0
+
+
 async def main() -> int:
     parser = argparse.ArgumentParser(
         description="Tranchi Engine — run deal-sourcing scrapers",
@@ -1067,6 +1147,7 @@ async def main() -> int:
             no_num = await _flag_incomplete_addresses(pool)
             transferred = await _mark_transferred_listings(pool)
             redeem_win = await _compute_redemption_windows(pool)
+            mi_redeem = await _compute_mi_redemption(pool)
             finalized = await _finalize_expired_redemptions(pool)
             dupes = await _dedup_cross_source_listings(pool)
             leads_ins = sum(s.get("inserted", 0) for s in lead_stats.values())
@@ -1074,9 +1155,9 @@ async def main() -> int:
             logger.info(
                 "Post-run: %d delisted, %d expired, %d parcel-stubs, %d owner-backfill, "
                 "%d distress-leads(+) %d distress-leads(-), %d no-number, %d transferred, "
-                "%d redemption-windows, %d finalized, %d dupes",
+                "%d redemption-windows, %d mi-redemption, %d finalized, %d dupes",
                 delisted, expired, stubs, owner_bf, leads_ins, leads_ret, no_num, transferred,
-                redeem_win, finalized, dupes,
+                redeem_win, mi_redeem, finalized, dupes,
             )
 
         total_errors = sum(r.errors for r in results)

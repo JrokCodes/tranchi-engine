@@ -282,8 +282,25 @@ def normalize_parcel_number(raw: str | None) -> str | None:
       return; if you only have PAID for an alpha-MAP parcel, use the spaced
       PARCELID from ReGIS or the Alt_Parcel from the tax CSV instead.
 
+    WAYNE COUNTY (MI / Detroit) — canonical form: the source string VERBATIM.
+      Detroit assessor parcels carry SIGNIFICANT trailing characters that must never
+      be stripped or two distinct parcels collide ('01000001.' != '010000023'):
+        Plain ward:    '02000184.'      (8 digits + trailing period)
+        Hyphen-range:  '02000185-6'     (8 digits + '-N', ~33,815 rows)
+        Split-suffix:  '03001910.001'   (8 digits + '.NNN', optional trailing alpha
+                       '21003982.002L')
+      Out-county packed: '35024030846002' (14 digits = '35-024-03-0846-002') — already
+      returned verbatim by the 14-char branch below; the `market` column disambiguates
+      it from a 14-digit Shelby canonical (both are returned unchanged).
+      DETECTION MUST PRECEDE the Cuyahoga 8-digit strip: '02000184.' stripped to digits
+      is '02000184' which the Cuyahoga compact branch would mis-format as '020-00-184';
+      and '03001910.001' stripped is 11 digits which the Shelby PAID branch would mangle.
+      Matching on the literal trailing '.'/'-'/alpha here catches them first. No other
+      live market has a period or an 8-digit+'-N' form, so the branch is disjoint.
+
     Detection logic (ORDER MATTERS — most specific first):
       - Matches DDD-NN-NNN exactly → Cuyahoga (idempotent).
+      - 8 digits + trailing '.'/'.NNN[alpha]' or 8 digits + '-N' → Wayne/Detroit (verbatim).
       - Purely numeric after strip, 8 digits → Cuyahoga compact.
       - No letters + <= 7 digits after strip → Summit (zero-pad to 7).
       - Exactly 14 alphanumeric chars, no spaces → already canonical (idempotent).
@@ -300,6 +317,12 @@ def normalize_parcel_number(raw: str | None) -> str | None:
     # ── Cuyahoga (OH): DDD-NN-NNN ─────────────────────────────────────────────
     if re.match(r"^\d{3}-\d{2}-\d{3}$", stripped):
         return stripped
+
+    # ── Wayne (MI / Detroit): preserve the significant trailing '.'/'-'/alpha ─────
+    # MUST be before the 8-digit Cuyahoga strip and the 10–11-digit Shelby PAID branch.
+    if re.match(r"^\d{8}\.\d*[A-Za-z]?$", stripped) or re.match(r"^\d{8}-\d+$", stripped):
+        return stripped.upper()
+
     digits_only = re.sub(r"\D", "", stripped)
     if len(digits_only) == 8:
         return f"{digits_only[:3]}-{digits_only[3:5]}-{digits_only[5:]}"

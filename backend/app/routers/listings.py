@@ -181,6 +181,9 @@ _DIM_MAP: dict[str, str] = {
     "probate": "Probate",
     "code_violation": "Code Violation",
     "code_violation_task": "Code Violation",
+    # Wayne/Detroit blight tickets — same pre-distress dimension as Cuyahoga code violations
+    # so they stack consistently for HOT scoring.
+    "blight_violation": "Code Violation",
     "tax_foreclosure": "Tax Distress",
     "cert_pending": "Tax Distress",
     "cert_sold": "Tax Distress",

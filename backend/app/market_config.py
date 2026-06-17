@@ -815,11 +815,236 @@ def _make_summit_market() -> dict:
     }
 
 
+def _make_wayne_market() -> dict:
+    """Wayne County (Detroit, MI) market config — the first non-OH/TN market.
+
+    NEW LEGAL FRAMEWORK (MCL-verified, G1 2026-06-11):
+      - Mortgage foreclosure = NON-JUDICIAL (by advertisement), MCL 600.3201+. The legal
+        organ of record is Detroit Legal News (mipublicnotices area=82). POST-SALE the owner
+        has a 6-MONTH redemption window (MCL 600.3240; abandoned = 1mo, MCL 600.3241a) — so a
+        sheriff-deed is NOT final at sale. We surface BOTH pre-sale notices AND post-sale
+        in-redemption rows, tagged, with a computed redemption window keyed on `sale_date`.
+        (The redemption_windows policy below is wired in Phase 3 with wayne_foreclosure +
+        the run.py _compute_redemption_windows / _mark_expired generalization; held None here
+        so Phase-0 foundation stays additive — mortgage_foreclosure also exists in OH where
+        the sale IS final, so the in-redemption carve-out must be MARKET-scoped, not blanket.)
+      - Tax foreclosure auction = JUDICIAL tax-DEED (MCL 211.78+): ~3yr delinquency → Circuit
+        Court Judgment → CLEAN deed at sale, NO post-sale redemption (Rafaeli surplus claims
+        don't affect buyer title). Seasonal (Sept main auction); wayne_tax_auction ships dormant.
+
+    TWO PARCEL FORMATS (normalize_parcel_number 'wayne' branch in db.py): Detroit ward
+    '02000184.'/'02000185-6'/'03001910.001' (significant trailing '.'/'-'/alpha) + out-county
+    packed 14-digit '35024030846002'. Detroit-only spine for v1 (county layer 9yr stale).
+
+    PROBATE = Phase 2 (Bison-pattern Vision PDF extractor over PC565/PC559) — not in this build;
+    probate_transfer_rule stays None until it ships.
+    """
+
+    def registry_link(parcel: str | None, address: str | None,
+                      native_parcel_id: str | None = None) -> str:
+        # Wayne County Treasurer property-tax lookup (pto): search by parcel/address, shows
+        # current owner + live delinquency status — the authoritative "is this still in
+        # foreclosure / who owns it now" cross-check named in the field-maps. ASP.NET search
+        # page (human types the parcel); no stable per-parcel deep-link param.
+        return "https://pto.waynecounty.com/"
+
+    def source_link(signal_type: str, parcel: str | None, case: str | None,
+                    sale_date, address: str | None,
+                    native_parcel_id: str | None = None) -> str:
+        sig = signal_type or ""
+        if sig == "mortgage_foreclosure":
+            return "https://www.mipublicnotices.com/   (search the foreclosure notice by address/mortgagor)"
+        elif sig == "tax_delinquent_foreclosure":
+            return "https://www.waynecountytreasurermi.com/   (Wayne County Treasurer tax-foreclosure auction)"
+        elif sig == "land_bank_inventory":
+            return "https://buildingdetroit.org/   (Detroit Land Bank — or waynecountylandbank.com for out-county)"
+        elif sig == "tax_delinquent":
+            return "https://pto.waynecounty.com/   (Wayne Treasurer delinquency / forfeiture record)"
+        elif sig == "blight_violation":
+            return "https://data.detroitmi.gov/datasets/blight-violations   (Detroit blight-ticket record)"
+        else:
+            return "https://pto.waynecounty.com/"
+
+    def offmarket_links(address: str, city: str | None, zip_: str | None) -> tuple[str, str]:
+        return _zillow_url(address, city, "MI", zip_), _redfin_url(address, city, "MI", zip_)
+
+    verification_guide = {
+        "mortgage_foreclosure": {
+            "valid": (
+                "Foreclosure-by-advertisement notice still published (Detroit Legal News / "
+                "mipublicnotices) OR within the 6-MONTH post-sale redemption window (MCL 600.3240). "
+                "MI NOTE: a PAST sale date is NOT stale here — post-sale the owner can still redeem "
+                "for 6 months, so an in-redemption row is a live off-market lead (tagged 'in redemption'). "
+                "pto.waynecounty.com confirms the parcel + a private-party owner still on title."
+            ),
+            "red_flags": (
+                "Notice dropped off the feed with no re-publication AND the 6-month redemption window "
+                "has elapsed (deed now final — our _finalize_expired_redemptions flips it to 'final'). "
+                "pto/Detroit assessor shows a transfer to a new private owner after we listed it "
+                "(redeemed / sold — _mark_transferred_listings removes it)."
+            ),
+        },
+        "tax_delinquent_foreclosure": {
+            "valid": (
+                "Parcel still on the Wayne County Treasurer auction (STATUS active, auction window OPEN). "
+                "Judicial tax-DEED: clean fee title, NO post-sale redemption. Min bid starts at back-tax "
+                "(often <$2k; many no-reserve $900 lots). SEV (≈50% of market) high vs min bid = equity. "
+                "pto.waynecounty.com confirms the parcel is still delinquent / Treasurer-held."
+            ),
+            "red_flags": (
+                "Row carries STATUS_CD=RM (REMOVED — redeemed/withdrawn) OR the auction window has closed "
+                "(sale_date past = the auction ran; clean deed, no redemption to wait on). "
+                "pto shows the taxes paid / a new private owner (redeemed before sale)."
+            ),
+        },
+        "land_bank_inventory": {
+            "valid": (
+                "Still listed on buildingdetroit.org (Auction / Own It Now / Rehabbed & Ready, or a "
+                "buyable Marketed/Improved/Oversized lot) with marketable_feature != 'Under Contract', "
+                "OR on the Wayne County Land Bank (ePropertyPlus) with available='Y'. Government-owned, "
+                "priced to move; expect deep discount + possible deed restrictions."
+            ),
+            "red_flags": (
+                "Property moved to buildingdetroit.org /pastlistings (sold) or vanished from the For-Sale "
+                "layer (our scraper marks it not_listed next cycle). 'Under Contract' flag set. Restricted "
+                "Side/Neighborhood lot (adjacent-owner-only) — those are coverage, never shown as a deal."
+            ),
+        },
+        # Pre-Distress LEADS (surface_distress.py) — surfaced only AFTER buy-now is verified
+        # (G3-era), with the gate tightened then (Detroit raw volume is huge; defensibility +
+        # diversity over raw count). distress_lead_types rows stay DISABLED until then.
+        "tax_delinquent": {
+            "valid": (
+                "On the Wayne County Treasurer forfeiture roll (≥2yr delinquent, facing the 2026 "
+                "circuit-court tax foreclosure) with a PRIVATE-party owner. PRE-DISTRESS LEAD — under "
+                "tax pressure but NOT yet for sale through any channel; owner can still redeem (prime "
+                "outreach). Off-market on Zillow/Redfin is consistent (good). pto confirms a balance owed."
+            ),
+            "red_flags": (
+                "pto shows the balance paid / parcel redeemed (resolved). Parcel already on the Treasurer "
+                "AUCTION (that's a buy-now deal now, not a lead). Transfer to a new private owner (sold). "
+                "Actively listed on MLS (selling normally — note it). NOT itself an offering of sale."
+            ),
+        },
+        "blight_violation": {
+            "valid": (
+                "Parcel carries unpaid Detroit blight judgment(s) — amt_balance_due > 0, disposition "
+                "'Responsible…', ideally In Collections or multiple tickets — with an LLC / absentee owner. "
+                "PRE-DISTRESS LEAD: owner has stopped maintaining and stopped paying; blight debt attaches "
+                "to the parcel and precedes tax-foreclosure. Off-market on Zillow/Redfin is consistent (good)."
+            ),
+            "red_flags": (
+                "Balance paid in full (amt_balance_due = 0 — resolved). Disposition 'Not responsible' "
+                "(dismissed). Recent transfer to a new owner on the Detroit assessor record (already sold). "
+                "Single trivial ticket with $0 balance is weak — needs the qualified slice."
+            ),
+        },
+    }
+
+    return {
+        "db": "tranchi",
+        "state": "MI",
+        "state_filter": "l.property_state = 'MI'",
+        # Pre-distress lead surfacing (surface_distress.py). Wayne sources the lead ADDRESS from
+        # the parcel SPINE (Detroit assessor situs is well-covered). gate_sql is held loose here;
+        # the DEFENSIBLE-SLICE tightening (blight In-Collections/multi-ticket floor; forfeiture
+        # residential filter) is a G3-era tuning pass (resolved 2026-06-16) — the distress_lead_types
+        # rows stay DISABLED until buy-now is verified, so nothing surfaces regardless.
+        "distress_lead_county": "Wayne",
+        "distress_lead_rules": {
+            "tax_delinquent": {"address_source": "spine", "address_key": None,
+                               "owner_key": "owner", "gate_sql": None},
+            "blight_violation": {"address_source": "spine", "address_key": None,
+                                 "owner_key": "owner", "gate_sql": None},
+        },
+        "deal_sources": (
+            "mortgage_foreclosure",
+            "tax_delinquent_foreclosure",
+            "land_bank_inventory",
+            "tax_delinquent",     # Pre-Distress LEAD (Treasurer forfeiture roll)
+            "blight_violation",   # Pre-Distress LEAD (Detroit blight tickets)
+        ),
+        "source_sites": {
+            "Wayne County Foreclosure": "mortgage_foreclosure",
+            "Wayne County Treasurer's Auction": "tax_delinquent_foreclosure",
+            "Detroit Land Bank Authority": "land_bank_inventory",
+            "Wayne County Land Bank": "land_bank_inventory",
+            "Wayne Tax Delinquent (Lead)": "tax_delinquent",
+            "Wayne Blight (Lead)": "blight_violation",
+        },
+        # Per-source retirement policy (listings source_sites). All four deal feeds re-pull their
+        # full live set each run (absence = resolved). Tax-auction is year-versioned full_rescan,
+        # gated to an OPEN auction window inside the scraper (ships dormant). Signals (blight DELTA,
+        # forfeiture ARCHIVE) own their own retirement in-scraper, not here.
+        "staleness_policies": {
+            "Wayne County Foreclosure": "full_rescan",
+            "Detroit Land Bank Authority": "full_rescan",
+            "Wayne County Land Bank": "full_rescan",
+            "Wayne County Treasurer's Auction": "full_rescan",
+        },
+        "source_meta": {
+            "Wayne County Foreclosure": ("https://www.mipublicnotices.com/", "deal"),
+            "Wayne County Treasurer's Auction": ("https://www.waynecountytreasurermi.com/", "deal"),
+            "Detroit Land Bank Authority": ("https://buildingdetroit.org/", "deal"),
+            "Wayne County Land Bank": ("https://www.waynecountylandbank.com/", "deal"),
+            "Detroit Open Data — Blight Tickets": ("https://data.detroitmi.gov/datasets/blight-violations", "signal"),
+            "Wayne County Treasurer — Forfeiture List": (
+                "https://www.waynecountymi.gov/Government/Elected-Officials/Treasurer/Property-Tax-Information/Forfeited-Property-List-with-Interested-Parties",
+                "signal",
+            ),
+            "Detroit Open Data — Parcels (Current)": ("https://data.detroitmi.gov/", "registry"),
+            "Wayne Tax Delinquent (Lead)": ("https://pto.waynecounty.com/", "lead"),
+            "Wayne Blight (Lead)": ("https://data.detroitmi.gov/datasets/blight-violations", "lead"),
+        },
+        # Probate is Phase 2 (Vision PDF extractor) — no auto-transfer rule until it ships.
+        "probate_transfer_rule": None,
+        # MI mortgage redemption (MCL 600.3240) is a FLAT 6-month window keyed on `sale_date`
+        # (not TN's delinquency-age tiers keyed on confirmation_order_date). Held None here;
+        # wired in Phase 3 with wayne_foreclosure + the run.py _compute_redemption_windows /
+        # _mark_expired generalization (the in-redemption carve-out is MARKET-scoped because
+        # mortgage_foreclosure also exists in OH, where the sale is final at confirmation).
+        "redemption_windows": None,
+        # Live cross-verify endpoints (scripts/playwright_source_check.py reads URLs from here).
+        "verifier_endpoints": {
+            "parcels_arcgis": "https://services2.arcgis.com/qvkbeam7Wirps6zC/arcgis/rest/services/parcel_file_current/FeatureServer/0/query",
+            "property_sales_arcgis": "https://services2.arcgis.com/qvkbeam7Wirps6zC/arcgis/rest/services/assessor_property_sales_view/FeatureServer/0/query",
+            "blight_arcgis": "https://services2.arcgis.com/qvkbeam7Wirps6zC/arcgis/rest/services/blight_tickets/FeatureServer/0/query",
+            "mipublicnotices_api": "https://www.mipublicnotices.com/api/v1/search/search",
+            "tax_auction_api": "https://waynecountytreasurermi.com/api/General/SearchItems",
+            "dlba_api": "https://buildingdetroit.org/properties",
+            "wclb_api": "https://public-wclb.epropertyplus.com/landmgmtpub/remote/public/property/getPublishedProperties",
+            "pto_base": "https://pto.waynecounty.com/",
+        },
+        "registry_link": registry_link,
+        "registry_label": "Wayne County Treasurer (pto) — live owner + delinquency lookup",
+        "registry_search_hint": (
+            "Opens pto.waynecounty.com — type the parcel ID (keep the trailing '.'/'-' exactly — "
+            "it is significant) or the street address to pull the current owner + live tax status. "
+            "The machine authority behind our stored owner/situs is the Detroit Open Data parcel + "
+            "property-sales layers (city assessor)."
+        ),
+        "registry_look_for": (
+            "(1) Owner on pto / Detroit assessor should match our stored owner_name. "
+            "(2) Situs address should match. "
+            "(3) For tax_delinquent / tax-auction: a balance owed > $0 confirms live distress; $0 = "
+            "redeemed (dead). "
+            "(4) The most recent transfer date (Detroit Property Sales) is our last_sale_date — a "
+            "transfer AFTER we first listed means the parcel sold; _mark_transferred_listings removes it. "
+            "(5) Mortgage foreclosure: a PAST sale date is still valid while inside the 6-month MI "
+            "redemption window (tagged 'in redemption')."
+        ),
+        "source_link": source_link,
+        "offmarket_links": offmarket_links,
+        "verification_guide": verification_guide,
+    }
+
+
 # The market registry. To add a market: implement _make_<market>_market() and add it here.
 MARKETS: dict[str, dict] = {
     "cuyahoga": _make_cuyahoga_market(),
     "shelby": _make_shelby_market(),
     "summit": _make_summit_market(),
+    "wayne": _make_wayne_market(),
 }
 
 
@@ -862,6 +1087,20 @@ MARKET_SCRAPERS: dict[str, dict] = {
             "summit_landbank",        # Summit County Land Bank (Tolemi GraphQL)
             "summit_delinquent_tax",  # SC720_DELQ certified-delinquent SIGNAL (pre-distress lever)
             "summit_foreclosure_filings",  # ALN Common Pleas foreclosure-FILING SIGNAL (pre-distress)
+        ],
+    },
+    "wayne": {
+        # 378K Detroit-parcel ArcGIS sweep (+ 509K property-sales enrich) too heavy for the 3h
+        # run → own weekly cron (--site wayne_parcels). Probate is Phase 2 (not listed yet).
+        "registry": "wayne_parcels",
+        "registry_in_full_run": False,
+        "deal_and_signal": [
+            "wayne_foreclosure",     # mortgage foreclosure (mipublicnotices area=82 + auction.com) — redemption lifecycle
+            "wayne_dlba",            # Detroit Land Bank (buildingdetroit + ArcGIS) — structures + buyable lots
+            "wayne_wclb",            # Wayne County Land Bank (ePropertyPlus, out-county)
+            "wayne_tax_auction",     # Wayne Treasurer tax-foreclosure auction — SEASONAL, ships dormant
+            "wayne_blight",          # Detroit blight tickets SIGNAL (pre-distress lever; DELTA on ticket_updated_at)
+            "wayne_delinquent_tax",  # Wayne Treasurer forfeiture-PDF SIGNAL (pre-distress)
         ],
     },
 }

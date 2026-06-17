@@ -1029,7 +1029,12 @@ async def upsert_parcels(
                             source_url           = $12,
                             native_parcel_id     = COALESCE($13, native_parcel_id),
                             market               = $14,
-                            property_state       = $15
+                            property_state       = $15,
+                            -- Sale data persisted by registry sweeps that carry it (Wayne folds
+                            -- Detroit Property Sales into the spine). COALESCE-guarded: markets
+                            -- whose registry hit passes NULL keep the value enrich_sales*.py set.
+                            last_sale_date       = COALESCE($16, last_sale_date),
+                            last_sale_price      = COALESCE($17, last_sale_price)
                         WHERE parcel_number = $1
                         """,
                         hit["parcel_number"],
@@ -1047,6 +1052,8 @@ async def upsert_parcels(
                         native_parcel_id,
                         market,
                         property_state,
+                        hit.get("last_sale_date"),
+                        hit.get("last_sale_price"),
                     )
                     counts["updated"] += 1
                 else:
@@ -1058,14 +1065,16 @@ async def upsert_parcels(
                             school_district, current_market_value,
                             current_tax_balance, delinquent_flag,
                             first_seen_at, last_seen_at, source_url,
-                            native_parcel_id, market, property_state
+                            native_parcel_id, market, property_state,
+                            last_sale_date, last_sale_price
                         ) VALUES (
                             $1, $2, $3,
                             $4, $5, $6,
                             $7, $8,
                             $9, $10,
                             $11, $11, $12,
-                            $13, $14, $15
+                            $13, $14, $15,
+                            $16, $17
                         )
                         ON CONFLICT (parcel_number) DO NOTHING
                         """,
@@ -1084,6 +1093,8 @@ async def upsert_parcels(
                         native_parcel_id,
                         market,
                         property_state,
+                        hit.get("last_sale_date"),
+                        hit.get("last_sale_price"),
                     )
                     counts["inserted"] += 1
             except Exception as exc:
