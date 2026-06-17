@@ -16,6 +16,11 @@ export interface ListingFilters {
   q?: string;
   sort?: string;
   order?: 'asc' | 'desc';
+  // Blight pre-distress filters — only meaningful when distress_stage=distress_signal + Wayne market.
+  conviction_tier?: 'A' | 'B' | 'C';
+  min_balance?: number;
+  min_tickets?: number;
+  absentee?: boolean;
 }
 
 // ─── Build URLSearchParams ─────────────────────────────────────────────────────
@@ -36,6 +41,10 @@ export function buildParams(filters: ListingFilters, page: number, pageSize = 50
   if (filters.q) p.set('q', filters.q);
   if (filters.sort) p.set('sort', filters.sort);
   if (filters.order) p.set('order', filters.order);
+  if (filters.conviction_tier) p.set('conviction_tier', filters.conviction_tier);
+  if (filters.min_balance != null) p.set('min_balance', String(filters.min_balance));
+  if (filters.min_tickets != null) p.set('min_tickets', String(filters.min_tickets));
+  if (filters.absentee) p.set('absentee', 'true');
 
   return p;
 }

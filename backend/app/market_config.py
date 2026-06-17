@@ -948,16 +948,37 @@ def _make_wayne_market() -> dict:
         # other markets since c557b57 — two same-state markets must not cross-contaminate).
         "market_filter": "l.market = 'wayne'",
         # Pre-distress lead surfacing (surface_distress.py). Wayne sources the lead ADDRESS from
-        # the parcel SPINE (Detroit assessor situs is well-covered). gate_sql is held loose here;
-        # the DEFENSIBLE-SLICE tightening (blight In-Collections/multi-ticket floor; forfeiture
-        # residential filter) is a G3-era tuning pass (resolved 2026-06-16) — the distress_lead_types
-        # rows stay DISABLED until buy-now is verified, so nothing surfaces regardless.
+        # the parcel SPINE (Detroit assessor situs is well-covered). blight_violation carries the
+        # STRICT VALIDITY FLOOR (below) + A/B/C conviction tiers stamped by wayne_blight_tiering.py;
+        # tax_delinquent stays loose (gate_sql=None) and DEFERRED (forfeiture PDF WAF-blocked,
+        # annual). The distress_lead_types rows stay DISABLED until verified, so nothing surfaces
+        # until `UPDATE tranchi.distress_lead_types SET enabled=true` after the go-live verify pass.
         "distress_lead_county": "Wayne",
         "distress_lead_rules": {
             "tax_delinquent": {"address_source": "spine", "address_key": None,
                                "owner_key": "owner", "gate_sql": None},
-            "blight_violation": {"address_source": "spine", "address_key": None,
-                                 "owner_key": "owner", "gate_sql": None},
+            # STRICT VALIDITY FLOOR (live-verified 2026-06-17 → ~43.8k floor parcels). Surfaces
+            # only REAL, verifiable blight distress; conviction tiers (A/B/C) are stamped above
+            # this floor by wayne_blight_tiering.py. Each predicate is a validity gate, not a
+            # volume knob: Responsible* = owner IS liable (excludes 'Not responsible'/'Pending'/
+            # blank); In Collections = city escalated (real debt); balance>0 = unpaid; residential
+            # = Marc's buy-box + forces a spine join (verifiable). NOTE: gate_sql is interpolated
+            # into surface_distress retire/refresh EXISTS subqueries that have ONLY `s` (no `p`
+            # join) — so the residential check MUST be a correlated subquery on s.parcel_number,
+            # never a bare p.* reference, or those statements throw. Regex-guard the numeric cast.
+            "blight_violation": {
+                "address_source": "spine", "address_key": None, "owner_key": "owner",
+                "gate_sql": (
+                    "(s.payload->>'disposition' ILIKE 'Responsible%' "
+                    " AND s.payload->>'collection_status' = 'In Collections' "
+                    " AND s.payload->>'amt_balance_due' ~ '^[0-9.]+$' "
+                    " AND (s.payload->>'amt_balance_due')::numeric > 0 "
+                    " AND EXISTS (SELECT 1 FROM tranchi.parcels p2 "
+                    "             WHERE p2.parcel_number = s.parcel_number "
+                    "               AND p2.market = s.market "
+                    "               AND p2.property_class ILIKE 'RESIDENTIAL%'))"
+                ),
+            },
         },
         "deal_sources": (
             "mortgage_foreclosure",

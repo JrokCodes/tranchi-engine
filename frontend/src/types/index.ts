@@ -80,6 +80,13 @@ export interface ApiListingItem {
   street_view_url: string | null;
   // One-click verification deep-links (built server-side in verify_links.py).
   verify_links: VerifyLinks | null;
+  // Blight pre-distress conviction tier (Wayne–Detroit only; null on all other listings).
+  // A = highest conviction, C = watch. Derived server-side from blight_ticket_count +
+  // blight_total_balance + absentee_owner. Non-null only when distress_stage=distress_signal.
+  conviction_tier: 'A' | 'B' | 'C' | null;
+  blight_ticket_count: number | null;
+  blight_total_balance: number | null;
+  absentee_owner: boolean | null;
 }
 
 export interface VerifyLinks {

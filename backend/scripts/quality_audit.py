@@ -494,6 +494,119 @@ async def check_coverage_delta(conn: asyncpg.Connection) -> list[dict[str, Any]]
     return findings
 
 
+async def check_lead_signal_orphan(conn: asyncpg.Connection) -> list[dict[str, Any]]:
+    """Active pre-distress LEADS whose backing signal is no longer fresh.
+
+    surface_distress.py OWNS lead lifecycle: a lead must be retired (status='not_listed')
+    the moment its backing signal goes stale (parcel paid off / off the list). A lead with
+    NO fresh (≤4d) signal of its (source, signal_type) means that retirement regressed.
+    Market-agnostic (joins distress_lead_types for each lead's signal source/type).
+    """
+    rows = await conn.fetch("""
+        SELECT l.id::text, l.source_site, l.market, l.property_address, l.source_listing_id
+        FROM tranchi.listings l
+        JOIN tranchi.distress_lead_types dlt ON dlt.source_site = l.source_site
+        WHERE l.distress_stage = 'distress_signal'
+          AND l.status = 'active'
+          AND NOT EXISTS (
+              SELECT 1 FROM tranchi.signals s
+              WHERE s.parcel_number = l.source_listing_id
+                AND s.source = dlt.signal_source
+                AND s.signal_type = dlt.signal_type
+                AND s.last_seen_at >= NOW() - INTERVAL '4 days'
+          )
+    """)
+    return [{
+        "listing_id": r["id"], "source": r["source_site"], "market": r["market"],
+        "address": r["property_address"], "parcel": r["source_listing_id"],
+    } for r in rows]
+
+
+async def check_lead_buynow_overlap(conn: asyncpg.Connection) -> list[dict[str, Any]]:
+    """Active leads on a parcel that ALSO has an active buy-now listing.
+
+    surface_distress retires the lead when a real buy-now deal appears on the same parcel
+    (the deal supersedes the lead). Any overlap means a parcel shows twice — count > 0 = bug.
+    """
+    rows = await conn.fetch("""
+        SELECT l.id::text, l.source_site, l.market, l.property_address, l.source_listing_id
+        FROM tranchi.listings l
+        WHERE l.distress_stage = 'distress_signal'
+          AND l.status = 'active'
+          AND EXISTS (
+              SELECT 1 FROM tranchi.listings bl
+              WHERE bl.source_listing_id = l.source_listing_id
+                AND bl.status = 'active'
+                AND bl.distress_stage = 'buy_now'
+          )
+    """)
+    return [{
+        "listing_id": r["id"], "source": r["source_site"], "market": r["market"],
+        "address": r["property_address"], "parcel": r["source_listing_id"],
+    } for r in rows]
+
+
+async def check_mi_redemption_conformance(conn: asyncpg.Connection) -> list[dict[str, Any]]:
+    """Wayne (MI) mortgage-foreclosure redemption lifecycle (MCL 600.3240) conformance.
+
+    Two invariants enforced by run.py carve-outs + _compute_mi_redemption:
+      (a) an active row whose sale_date is > 180 days past should have EXPIRED — the 6-month
+          redemption window is over; staying active = the carve-out's 180-day bound regressed.
+      (b) an in-redemption row (sale_date in the past, still active) MUST carry the computed
+          redemption_ends + redemption_status stamp; a NULL stamp = _compute_mi_redemption missed it.
+    """
+    findings: list[dict[str, Any]] = []
+    over = await conn.fetch("""
+        SELECT id::text, property_address, sale_date
+        FROM tranchi.listings
+        WHERE market='wayne' AND signal_type='mortgage_foreclosure' AND status='active'
+          AND sale_date < CURRENT_DATE - INTERVAL '180 days'
+    """)
+    for r in over:
+        findings.append({"sub_check": "past_180d_not_expired", "listing_id": r["id"],
+                         "address": r["property_address"],
+                         "sale_date": r["sale_date"].isoformat() if r["sale_date"] else None})
+    unstamped = await conn.fetch("""
+        SELECT id::text, property_address, sale_date
+        FROM tranchi.listings
+        WHERE market='wayne' AND signal_type='mortgage_foreclosure' AND status='active'
+          AND sale_date < CURRENT_DATE
+          AND (redemption_ends IS NULL OR redemption_status IS NULL)
+    """)
+    for r in unstamped:
+        findings.append({"sub_check": "in_redemption_unstamped", "listing_id": r["id"],
+                         "address": r["property_address"],
+                         "sale_date": r["sale_date"].isoformat() if r["sale_date"] else None})
+    return findings
+
+
+async def check_transfer_conformance(conn: asyncpg.Connection) -> list[dict[str, Any]]:
+    """Active listings on a parcel that SOLD after we first listed it.
+
+    _mark_transferred_listings flips any active row whose parcel last_sale_date > first_seen_at
+    to 'transferred' (sold out from under the lead). If such a row is still active AND the
+    registry HAS the sale date, the transfer guard missed it (silent off-market rot). Only
+    bites where last_sale_date enrichment exists — NULLs are skipped (unknown, not a miss).
+    """
+    rows = await conn.fetch("""
+        SELECT l.id::text, l.source_site, l.market, l.property_address,
+               p.last_sale_date, l.first_seen_at
+        FROM tranchi.listings l
+        JOIN tranchi.parcels p
+          ON p.parcel_number = l.source_listing_id AND p.market = l.market
+        WHERE l.status = 'active'
+          AND l.duplicate_of IS NULL
+          AND p.last_sale_date IS NOT NULL
+          AND p.last_sale_date > l.first_seen_at::date
+    """)
+    return [{
+        "listing_id": r["id"], "source": r["source_site"], "market": r["market"],
+        "address": r["property_address"],
+        "last_sale_date": r["last_sale_date"].isoformat() if r["last_sale_date"] else None,
+        "first_seen_at": r["first_seen_at"].isoformat() if r["first_seen_at"] else None,
+    } for r in rows]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Digest formatting
 # ─────────────────────────────────────────────────────────────────────────────
@@ -594,6 +707,19 @@ def _format_digest(findings: dict[str, list[dict[str, Any]]]) -> str:
             f"drift={r['drift_pct']}% (run@{r['last_run_at'][:16]})"
         )
 
+    # Lifecycle-guard conformance (leads + MI redemption + transfer). Each expects 0.
+    for key, label in (
+        ("lead_signal_orphan", "leads w/o a fresh backing signal (retire regressed)"),
+        ("lead_buynow_overlap", "leads overlapping an active buy-now"),
+        ("mi_redemption_conformance", "Wayne MI redemption violations"),
+        ("transfer_conformance", "sold-but-still-active (transfer guard missed)"),
+    ):
+        items = findings.get(key, [])
+        lines.append(f"\n[{key}] {len(items)} {label} (expected 0)")
+        for r in items[:3]:
+            extra = r.get("sub_check") or r.get("market") or ""
+            lines.append(f"  - {extra} {r.get('address') or r.get('parcel') or r.get('listing_id')}")
+
     lines.append("\n" + "=" * 50)
     return "\n".join(lines)
 
@@ -611,6 +737,10 @@ def _print_table(findings: dict[str, list[dict[str, Any]]], elapsed: float) -> N
         ("signal_freshness",
          [{"total": findings["signal_freshness"][0]["total_stale"]}] if findings["signal_freshness"] else []),
         ("coverage_delta", [r for r in findings["coverage_delta"] if r["flagged"]]),
+        ("lead_signal_orphan", findings.get("lead_signal_orphan", [])),
+        ("lead_buynow_overlap", findings.get("lead_buynow_overlap", [])),
+        ("mi_redemption_conformance", findings.get("mi_redemption_conformance", [])),
+        ("transfer_conformance", findings.get("transfer_conformance", [])),
     ]
     print()
     print(f"  {'CHECK':<30} {'COUNT':>7}  RESULT")
@@ -644,6 +774,10 @@ async def main() -> None:
             "probate_join_sanity":  await check_probate_join_sanity(conn),
             "signal_freshness":     await check_signal_freshness(conn),
             "coverage_delta":       await check_coverage_delta(conn),
+            "lead_signal_orphan":   await check_lead_signal_orphan(conn),
+            "lead_buynow_overlap":  await check_lead_buynow_overlap(conn),
+            "mi_redemption_conformance": await check_mi_redemption_conformance(conn),
+            "transfer_conformance": await check_transfer_conformance(conn),
         }
     finally:
         await conn.close()
@@ -675,6 +809,10 @@ async def main() -> None:
         or closed_probate
         or overmatched_joins
         or flagged_coverage
+        or findings["lead_signal_orphan"]
+        or findings["lead_buynow_overlap"]
+        or findings["mi_redemption_conformance"]
+        or findings["transfer_conformance"]
     )
     if anything_flagged:
         _send_telegram(digest)

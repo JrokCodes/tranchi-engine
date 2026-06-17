@@ -16,6 +16,12 @@ export interface FilterState {
   // LEADS (tax-delinquent lawsuit / eviction). Composes with county on the server (ANDed),
   // so Memphis + Buy Now returns only Memphis buy-now listings.
   distress_stage: string;
+  // Blight pre-distress conviction filters — only shown/applied when
+  // distress_stage === 'distress_signal' AND county === 'Wayne'.
+  conviction_tier: 'A' | 'B' | 'C' | '';
+  min_balance: string;   // string so the input is controlled; converted to number when sent to API
+  min_tickets: string;   // same
+  absentee: boolean;
 }
 
 export const STAGE_OPTIONS: { label: string; value: string }[] = [
@@ -34,6 +40,10 @@ export const defaultFilters: FilterState = {
   sort: 'first_seen_at',
   order: 'desc',
   distress_stage: 'buy_now',
+  conviction_tier: '',
+  min_balance: '',
+  min_tickets: '',
+  absentee: false,
 };
 
 const STATUS_OPTIONS: { label: string; value: string }[] = [
@@ -41,6 +51,12 @@ const STATUS_OPTIONS: { label: string; value: string }[] = [
   { label: 'Not Listed', value: 'not_listed' },
   { label: 'Expired', value: 'expired' },
   { label: 'Cancelled', value: 'cancelled' },
+];
+
+const TIER_OPTIONS: { label: string; value: string }[] = [
+  { label: 'A — High', value: 'A' },
+  { label: 'B — Medium', value: 'B' },
+  { label: 'C — Watch', value: 'C' },
 ];
 
 interface SelectProps {
@@ -176,12 +192,20 @@ export function FilterBar({ filters, onChange, onClear }: Props) {
     onChange({ ...filters, distress_stage: stage, source_site: '' });
   }
 
+  // True when the blight sub-controls should be visible: Pre-Distress view + Wayne market.
+  const isWaynePreDistress =
+    filters.distress_stage === 'distress_signal' && filters.county === 'Wayne';
+
   const isFiltered =
     !!filters.county ||
     !!filters.source_site ||
     !!filters.status ||
     filters.has_signals ||
-    !!filters.q;
+    !!filters.q ||
+    !!filters.conviction_tier ||
+    !!filters.min_balance ||
+    !!filters.min_tickets ||
+    filters.absentee;
 
   return (
     <div className="flex flex-wrap items-center gap-2">
@@ -257,6 +281,70 @@ export function FilterBar({ filters, onChange, onClear }: Props) {
       >
         Has signals
       </button>
+
+      {/* Blight conviction controls — only visible in Pre-Distress + Wayne–Detroit market.
+          Hidden in Buy Now view and any non-Wayne market to avoid filter clutter. */}
+      {isWaynePreDistress && (
+        <>
+          {/* Divider to visually separate the blight controls from the main bar */}
+          <span className="h-5 w-px bg-(--color-border) mx-1" aria-hidden="true" />
+
+          {/* Conviction tier dropdown */}
+          <SimpleSelect
+            label="Tier"
+            value={filters.conviction_tier}
+            options={TIER_OPTIONS}
+            onChange={(v) =>
+              onChange({ ...filters, conviction_tier: v as 'A' | 'B' | 'C' | '' })
+            }
+            placeholder="All tiers"
+          />
+
+          {/* Min blight balance numeric input */}
+          <div className="relative">
+            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[13px] text-(--color-muted) pointer-events-none">$</span>
+            <input
+              type="number"
+              min={0}
+              step={100}
+              value={filters.min_balance}
+              onChange={(e) => onChange({ ...filters, min_balance: e.target.value })}
+              placeholder="Min balance"
+              aria-label="Minimum blight balance"
+              className="h-9 pl-6 pr-3 text-[13px] rounded-full border border-(--color-border) bg-white text-(--color-ink) placeholder:text-(--color-muted) focus:outline-none focus:border-(--color-navy)/40 transition-colors w-36"
+            />
+          </div>
+
+          {/* Min ticket count numeric input */}
+          <div className="relative">
+            <input
+              type="number"
+              min={0}
+              step={1}
+              value={filters.min_tickets}
+              onChange={(e) => onChange({ ...filters, min_tickets: e.target.value })}
+              placeholder="Min tickets"
+              aria-label="Minimum blight ticket count"
+              className="h-9 px-3 text-[13px] rounded-full border border-(--color-border) bg-white text-(--color-ink) placeholder:text-(--color-muted) focus:outline-none focus:border-(--color-navy)/40 transition-colors w-28"
+            />
+          </div>
+
+          {/* Absentee owner toggle */}
+          <button
+            type="button"
+            onClick={() => onChange({ ...filters, absentee: !filters.absentee })}
+            aria-pressed={filters.absentee}
+            className={cn(
+              'h-9 px-3 text-[13px] rounded-full border transition-colors whitespace-nowrap font-medium',
+              filters.absentee
+                ? 'bg-(--color-navy) text-white border-(--color-navy)'
+                : 'bg-white text-(--color-slate) border-(--color-border) hover:border-(--color-navy)/30 hover:text-(--color-ink)'
+            )}
+          >
+            Absentee
+          </button>
+        </>
+      )}
 
       {/* Clear */}
       {isFiltered && (

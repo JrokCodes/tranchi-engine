@@ -62,6 +62,7 @@ from app.scrapers.code_violations import (  # noqa: E402
 )
 from app.scrapers.db import upsert_listings  # noqa: E402
 from app.scrapers.surface_distress import surface_distress_leads  # noqa: E402
+from app.scrapers.wayne_blight_tiering import tier_wayne_blight_leads  # noqa: E402
 from app.scrapers.delinquent_tax import DelinquentTaxScraper  # noqa: E402
 from app.scrapers.dln import DLNScraper  # noqa: E402
 from app.scrapers.forfeited_land import ForfeitedLandScraper  # noqa: E402
@@ -1144,6 +1145,9 @@ async def main() -> int:
             # BEFORE the transfer/dedup guards so leads get the same off-market + dedup
             # treatment as buy-now deals (migration 012).
             lead_stats = await surface_distress_leads(pool)
+            # Stamp conviction tiers + raw drivers on the freshly-materialized Wayne blight
+            # leads (per-parcel aggregation surface_distress can't do). No-op for other markets.
+            blight_tiers = await tier_wayne_blight_leads(pool)
             no_num = await _flag_incomplete_addresses(pool)
             transferred = await _mark_transferred_listings(pool)
             redeem_win = await _compute_redemption_windows(pool)
@@ -1159,6 +1163,7 @@ async def main() -> int:
                 delisted, expired, stubs, owner_bf, leads_ins, leads_ret, no_num, transferred,
                 redeem_win, mi_redeem, finalized, dupes,
             )
+            logger.info("Post-run: blight-tiers %s", blight_tiers.get("tier_split", blight_tiers))
 
         total_errors = sum(r.errors for r in results)
         return 1 if total_errors > 0 else 0

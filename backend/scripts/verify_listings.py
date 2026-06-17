@@ -75,6 +75,7 @@ _SELECT_COLS = """
     l.case_status, l.match_confidence, l.match_method, l.status,
     l.source_listing_id, l.address_status, l.auction_status,
     l.decedent_name, l.case_title, l.decedent_dod,
+    l.conviction_tier, l.blight_ticket_count, l.blight_total_balance, l.absentee_owner,
     (CURRENT_DATE - l.first_seen_at::date) AS lead_age_days,
     p.owner_name, p.current_market_value, p.current_tax_balance,
     p.land_use_code, p.last_sale_date, p.last_sale_price,
@@ -171,8 +172,14 @@ def _source_and_check(r: asyncpg.Record, market: dict) -> tuple[str, str]:
                    f"(3) Owner not recently transferred (still the distressed owner)  "
                    f"(4) Redfin/Zillow OFF-market = good (motivated, not yet listed)  -- {addr_hint}")
         elif sig == "blight_violation":
-            chk = (f"PRE-DISTRESS LEAD: (1) Detroit blight record: amt_balance_due > 0 on parcel {parcel}, owner = LLC/absentee  "
-                   f"(2) Owner not recently transferred (still holds the parcel)  "
+            tier = r["conviction_tier"] or "?"
+            tcount = r["blight_ticket_count"]
+            tbal = r["blight_total_balance"]
+            absentee = " absentee" if r["absentee_owner"] else ""
+            tier_hint = f"[Tier {tier}: {tcount} tickets, ${tbal}{absentee}] " if tcount is not None else ""
+            chk = (f"PRE-DISTRESS LEAD {tier_hint}: (1) Detroit blight record: amt_balance_due > 0, disposition 'Responsible%', "
+                   f"In Collections on parcel {parcel} (the floor — confirm it holds)  "
+                   f"(2) Owner not recently transferred (Detroit assessor/pto still the distressed owner)  "
                    f"(3) Redfin/Zillow OFF-market = good (not listing despite neglect)  -- {addr_hint}")
         else:
             chk = f"(1) pto.waynecounty.com parcel {parcel} exists  (2) Redfin/Zillow check  -- {addr_hint}"

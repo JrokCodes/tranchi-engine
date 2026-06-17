@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from 'framer-motion';
 import { X, AlertTriangle, Flame, MapPin, ExternalLink } from 'lucide-react';
 import { useListing } from '../../hooks/useListings';
 import { StatusBadge } from '../shared/StatusBadge';
+import { ConvictionTierBadge } from '../../pages/Listings';
 import {
   formatCurrency,
   formatDate,
@@ -218,6 +219,49 @@ function DrawerContent({ listingId, onClose }: { listingId: string; onClose: () 
           </div>
         )}
       </div>
+
+      {/* Blight conviction (Wayne–Detroit pre-distress leads only; null on all other listings) */}
+      {listing.conviction_tier && (
+        <div>
+          <SectionLabel>Blight Conviction</SectionLabel>
+          <div className="bg-white rounded-xl border border-(--color-border) p-4">
+            <div className="flex items-center gap-2 mb-3">
+              <ConvictionTierBadge tier={listing.conviction_tier} />
+              {listing.absentee_owner && (
+                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium border bg-(--color-navy)/5 text-(--color-navy) border-(--color-navy)/15 whitespace-nowrap">
+                  Absentee
+                </span>
+              )}
+            </div>
+            <div className="grid grid-cols-2 gap-x-6 gap-y-3">
+              {listing.blight_ticket_count != null && (
+                <KvRow
+                  label="Blight Tickets"
+                  value={`${listing.blight_ticket_count} ticket${listing.blight_ticket_count === 1 ? '' : 's'}`}
+                />
+              )}
+              {listing.blight_total_balance != null && (
+                <KvRow
+                  label="Blight Balance"
+                  value={formatCurrency(listing.blight_total_balance)}
+                />
+              )}
+              {listing.absentee_owner != null && (
+                <KvRow
+                  label="Absentee Owner"
+                  value={
+                    listing.absentee_owner ? (
+                      <span className="text-(--color-navy) font-semibold">Yes</span>
+                    ) : (
+                      <span className="text-(--color-slate)">No</span>
+                    )
+                  }
+                />
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Probate case (probate listings only) — decedent vs current owner is the verification value */}
       {listing.decedent_name && (

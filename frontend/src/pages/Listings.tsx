@@ -23,6 +23,7 @@ const COLUMNS = [
   { key: 'property_address', label: 'Address', sortable: true, width: 'min-w-[200px]' },
   { key: 'property_city', label: 'City', sortable: false, width: 'w-32' },
   { key: 'source_site', label: 'Source', sortable: false, width: 'w-32' },
+  { key: 'conviction_tier', label: 'Tier', sortable: false, width: 'w-24' },
   { key: 'signal_count', label: 'Signals', sortable: true, width: 'w-28' },
   { key: 'is_hot', label: 'HOT', sortable: false, width: 'w-16' },
   { key: 'status', label: 'Status', sortable: false, width: 'w-28' },
@@ -52,6 +53,10 @@ export default function Listings() {
       q: searchParams.get('q') ?? '',
       sort: (searchParams.get('sort') as SortKey) ?? 'first_seen_at',
       order: (searchParams.get('order') as 'asc' | 'desc') ?? 'desc',
+      conviction_tier: (searchParams.get('conviction_tier') as 'A' | 'B' | 'C') ?? '',
+      min_balance: searchParams.get('min_balance') ?? '',
+      min_tickets: searchParams.get('min_tickets') ?? '',
+      absentee: searchParams.get('absentee') === 'true',
     };
   });
 
@@ -80,6 +85,10 @@ export default function Listings() {
       next.set('distress_stage', newFilters.distress_stage);
     if (newFilters.has_signals) next.set('has_signals', 'true');
     if (newFilters.q) next.set('q', newFilters.q);
+    if (newFilters.conviction_tier) next.set('conviction_tier', newFilters.conviction_tier);
+    if (newFilters.min_balance) next.set('min_balance', newFilters.min_balance);
+    if (newFilters.min_tickets) next.set('min_tickets', newFilters.min_tickets);
+    if (newFilters.absentee) next.set('absentee', 'true');
     setSearchParams(next, { replace: true });
   }
 
@@ -115,6 +124,11 @@ export default function Listings() {
     q: filters.q || undefined,
     sort: sortField,
     order: sortDir,
+    // Blight params — only forwarded when set; API ignores them on non-Wayne markets.
+    conviction_tier: (filters.conviction_tier as 'A' | 'B' | 'C' | undefined) || undefined,
+    min_balance: filters.min_balance ? Number(filters.min_balance) : undefined,
+    min_tickets: filters.min_tickets ? Number(filters.min_tickets) : undefined,
+    absentee: filters.absentee || undefined,
   };
 
   const { data, isLoading, isError } = useListings(apiFilters, page);
@@ -269,6 +283,36 @@ export default function Listings() {
   );
 }
 
+// ─── Conviction tier badge ─────────────────────────────────────────────────────
+// Rendered in the table row (and reused in the detail drawer) for Wayne–Detroit
+// blight pre-distress leads. A = high conviction (red), B = medium (gold), C = watch (slate).
+
+const TIER_STYLE: Record<'A' | 'B' | 'C', string> = {
+  A: 'bg-[#DC2626]/10 text-[#DC2626] border-[#DC2626]/20',
+  B: 'bg-(--color-gold-light) text-[#8B6914] border-(--color-gold)/25',
+  C: 'bg-(--color-bg-elevated) text-(--color-slate) border-(--color-border)',
+};
+
+const TIER_LABEL: Record<'A' | 'B' | 'C', string> = {
+  A: 'A — High',
+  B: 'B — Med',
+  C: 'C — Watch',
+};
+
+export function ConvictionTierBadge({ tier }: { tier: 'A' | 'B' | 'C' }) {
+  return (
+    <span
+      className={cn(
+        'inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold border whitespace-nowrap',
+        TIER_STYLE[tier]
+      )}
+      title={`Conviction tier ${tier}`}
+    >
+      {TIER_LABEL[tier]}
+    </span>
+  );
+}
+
 // ─── Listing row ───────────────────────────────────────────────────────────────
 
 interface RowProps {
@@ -355,6 +399,13 @@ function ListingRow({ item, index, onClick }: RowProps) {
         >
           {sourceLabel(item.source_site)}
         </span>
+      </td>
+
+      {/* Conviction tier (Wayne–Detroit blight leads only; empty cell on all other listings) */}
+      <td className="px-4">
+        {item.conviction_tier && (
+          <ConvictionTierBadge tier={item.conviction_tier} />
+        )}
       </td>
 
       {/* Signals */}

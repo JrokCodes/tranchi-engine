@@ -98,6 +98,14 @@ class ListingItem(BaseModel):
     # 'no_street_number' = real registry-confirmed parcel (usu. vacant land) the county
     # lists without a house number; verify by parcel #, not street address. NULL = normal.
     address_status: str | None
+    # Detroit blight pre-distress LEAD tier + raw drivers (migration 020; NULL on buy-now and
+    # non-blight leads). conviction_tier A/B/C ranks every floor-passing lead so Marc filters
+    # by conviction; the drivers power fine filters + the lead card. Stamped by
+    # wayne_blight_tiering.py. Tier is a FILTER, not a kill — C still cleared the validity floor.
+    conviction_tier: str | None = None
+    blight_ticket_count: int | None = None
+    blight_total_balance: float | None = None
+    absentee_owner: bool | None = None
     first_seen_at: datetime | None
     last_seen_at: datetime | None
     signal_count: int
@@ -271,6 +279,10 @@ def _row_to_item(r: asyncpg.Record) -> ListingItem:
         redemption_window_days=r["redemption_window_days"],
         redemption_basis=r["redemption_basis"],
         address_status=r["address_status"],
+        conviction_tier=r["conviction_tier"],
+        blight_ticket_count=r["blight_ticket_count"],
+        blight_total_balance=_to_float(r["blight_total_balance"]),
+        absentee_owner=r["absentee_owner"],
         first_seen_at=r["first_seen_at"],
         last_seen_at=r["last_seen_at"],
         signal_count=sig_count,
@@ -340,6 +352,10 @@ _BASE_SELECT = """
         l.redemption_window_days,
         l.redemption_basis,
         l.address_status,
+        l.conviction_tier,
+        l.blight_ticket_count,
+        l.blight_total_balance,
+        l.absentee_owner,
         l.first_seen_at,
         l.last_seen_at,
         COALESCE(sig.n, 0)              AS signal_count,
@@ -388,6 +404,10 @@ def _build_where(
     min_signals: int | None,
     q: str | None,
     distress_stage: str | None = "buy_now",
+    conviction_tier: str | None = None,
+    min_balance: float | None = None,
+    min_tickets: int | None = None,
+    absentee: bool | None = None,
     include_duplicates: bool = False,
     include_unverified: bool = False,
 ) -> tuple[list[str], list, int]:
@@ -456,6 +476,26 @@ def _build_where(
         params.append(signal_type)
         idx += 1
 
+    # Pre-distress conviction-tier + raw-driver filters (Detroit blight leads, migration 020).
+    # These are Marc's filters over the floor-passing lead set; NULL on buy-now/non-blight rows.
+    if conviction_tier:
+        conditions.append(f"l.conviction_tier = ${idx}")
+        params.append(conviction_tier)
+        idx += 1
+
+    if min_balance is not None:
+        conditions.append(f"l.blight_total_balance >= ${idx}")
+        params.append(min_balance)
+        idx += 1
+
+    if min_tickets is not None:
+        conditions.append(f"l.blight_ticket_count >= ${idx}")
+        params.append(min_tickets)
+        idx += 1
+
+    if absentee is True:
+        conditions.append("l.absentee_owner IS TRUE")
+
     # Always-on probate validity gate (Marc's #1 rule: open cases only). A probate
     # listing whose court case_status reads closed/disposed/terminated/dismissed is
     # no longer a live lead — the estate is settled and the property has transferred.
@@ -507,6 +547,10 @@ async def list_listings(
     city: str | None = Query(default=None),
     signal_type: str | None = Query(default=None),
     distress_stage: str = Query(default="buy_now", description="buy_now (default) | distress_signal | all — Buy Now vs Pre-Distress toggle"),
+    conviction_tier: str | None = Query(default=None, description="Detroit blight lead tier: A|B|C"),
+    min_balance: float | None = Query(default=None, ge=0, description="Min blight_total_balance (pre-distress lead filter)"),
+    min_tickets: int | None = Query(default=None, ge=0, description="Min blight_ticket_count (pre-distress lead filter)"),
+    absentee: bool | None = Query(default=None, description="Only absentee-owner blight leads"),
     redemption_status: str | None = Query(default=None, description="TN tax-deed lifecycle: pending|redeemed|final"),
     has_signals: bool | None = Query(default=None),
     min_signals: int | None = Query(default=None, ge=0),
@@ -543,6 +587,10 @@ async def list_listings(
         min_signals=min_signals,
         q=q,
         distress_stage=distress_stage,
+        conviction_tier=conviction_tier,
+        min_balance=min_balance,
+        min_tickets=min_tickets,
+        absentee=absentee,
         include_duplicates=include_duplicates,
         include_unverified=include_unverified,
     )
