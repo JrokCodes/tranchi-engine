@@ -160,6 +160,36 @@ def _join_key(street: str | None, zip5: str | None) -> str | None:
     return f"{normalize_address(street)}|{zip5 or ''}"
 
 
+# Street-type suffixes + directionals to normalize away for the spine join. The Detroit
+# ASSESSOR situs omits the street suffix ('712 CASS', '16878 ASHTON') while foreclosure
+# notices include it ('16878 Ashton Ave') — an exact street match aligns on ~5% of rows.
+# The loose key (house# + street, suffix dropped, directionals → single letter, no zip)
+# lifts unique parcel-resolution to ~45% (validated 2026-06-17: 38→340 of 754, 4/4 correct).
+# Used ONLY for the spine parcel join — NEVER for normalized_address storage/dedup.
+_STREET_SUFFIX = {
+    "ST", "STREET", "AVE", "AVENUE", "RD", "ROAD", "DR", "DRIVE", "BLVD", "BOULEVARD",
+    "CT", "COURT", "LN", "LANE", "PL", "PLACE", "CIR", "CIRCLE", "TER", "TERRACE",
+    "PKWY", "PARKWAY", "WAY", "HWY", "HIGHWAY", "SQ", "SQUARE", "PT", "POINT",
+}
+_DIRECTIONAL = {"NORTH": "N", "SOUTH": "S", "EAST": "E", "WEST": "W"}
+
+
+def _loose_street_key(street: str | None) -> str | None:
+    """house# + normalized street with the street-type suffix dropped + directionals
+    standardized — to match the suffix-less Detroit assessor situs. Returns None if empty.
+    Unique-match-only at the call site, so collisions (e.g. '100 Main St' vs '100 Main Ave')
+    are left UNRESOLVED rather than mis-joined."""
+    if not street:
+        return None
+    toks = [t for t in re.sub(r"[^A-Za-z0-9 ]", " ", street.upper()).split() if t]
+    if not toks:
+        return None
+    toks = [_DIRECTIONAL.get(t, t) for t in toks]
+    if len(toks) > 2 and toks[-1] in _STREET_SUFFIX:  # keep >2 so '12 ST' (a named st) survives
+        toks = toks[:-1]
+    return " ".join(toks)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Reader A — mipublicnotices (httpx JSON, full pagination + scan-complete guard)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -318,28 +348,21 @@ async def _fetch_auction_com(client: httpx.AsyncClient) -> list[dict[str, Any]]:
 
 async def _resolve_parcels(
     pool: "asyncpg.Pool | None",
-    keys: list[tuple[str, str | None]],
+    streets: list[str],
 ) -> dict[str, str]:
-    """{join_key: normalized_parcel} for UNIQUELY-matched addresses, scoped market='wayne'."""
+    """{loose_street_key: normalized_parcel} for UNIQUELY-matched addresses (market='wayne').
+
+    Bulk-loads the whole wayne spine situs ONCE into an in-memory loose-key index, then
+    matches the notice streets against it — far faster than the old per-address
+    ILIKE ANY(...) × 377K seq-scan (~6.5 min → seconds) AND suffix-insensitive so it
+    actually matches the suffix-less Detroit assessor situs. Only UNIQUE loose-key matches
+    are accepted (a key with >1 candidate parcel is left unresolved → REVIEW, never mis-joined).
+    """
     out: dict[str, str] = {}
-    if pool is None or not keys:
+    if pool is None or not streets:
         return out
-    patterns: set[str] = set()
-    meta: list[tuple[str, str | None, str | None]] = []
-    seen_jkeys: set[str] = set()
-    for street, zip5 in keys:
-        jkey = _join_key(street, zip5)
-        if not jkey or jkey in seen_jkeys:
-            continue
-        seen_jkeys.add(jkey)
-        house_m = _HOUSE_RE.match(street or "")
-        house = house_m.group(1) if house_m else None
-        meta.append((jkey, street, zip5))
-        if house and zip5:
-            patterns.add(f"{house} %{zip5}%")
-        elif house:
-            patterns.add(f"{house} %")
-    if not patterns:
+    wanted = {lk for lk in (_loose_street_key(s) for s in streets) if lk}
+    if not wanted:
         return out
     try:
         async with pool.acquire() as conn:
@@ -348,33 +371,31 @@ async def _resolve_parcels(
                 SELECT parcel_number, situs_address
                 FROM tranchi.parcels
                 WHERE market = 'wayne'
-                  AND situs_address ILIKE ANY($1::text[])
                   AND situs_address IS NOT NULL AND situs_address <> ''
-                """,
-                list(patterns),
+                """
             )
     except Exception as exc:  # pragma: no cover
         logger.warning("WayneForeclosure: parcel resolution query failed: %s", exc)
         return out
     spine: dict[str, set[str]] = {}
     for r in rows:
-        s_street, s_zip = _street_zip(r["situs_address"])
-        skey = _join_key(s_street, s_zip)
-        if not skey:
+        s_street, _s_zip = _street_zip(r["situs_address"])
+        skey = _loose_street_key(s_street)
+        if not skey or skey not in wanted:
             continue
         norm = normalize_parcel_number(r["parcel_number"])
         if norm:
             spine.setdefault(skey, set()).add(norm)
     matched = ambiguous = 0
-    for jkey, _s, _z in meta:
-        cands = spine.get(jkey)
+    for lk in wanted:
+        cands = spine.get(lk)
         if cands and len(cands) == 1:
-            out[jkey] = next(iter(cands))
+            out[lk] = next(iter(cands))
             matched += 1
         elif cands:
             ambiguous += 1
-    logger.info("WayneForeclosure: parcel resolution — %d/%d matched (%d ambiguous)",
-                matched, len(meta), ambiguous)
+    logger.info("WayneForeclosure: parcel resolution — %d/%d unique loose-key matches (%d ambiguous), spine rows scanned=%d",
+                matched, len(wanted), ambiguous, len(rows))
     return out
 
 
@@ -427,13 +448,15 @@ class WayneForeclosureScraper(ListingScraper):
             if not row.get("street_only"):
                 row["street_only"], row["zip5"] = _street_zip(row.get("address"))
             row["jkey"] = _join_key(row.get("street_only"), row.get("zip5"))
+            row["lkey"] = _loose_street_key(row.get("street_only"))  # spine parcel-join key
 
-        uniq_keys = list({(r["street_only"], r["zip5"]) for r in reader_a + reader_b if r.get("street_only")})
-        parcel_by_jkey = await _resolve_parcels(self.pool, uniq_keys)
+        uniq_streets = [r["street_only"] for r in reader_a + reader_b if r.get("street_only")]
+        parcel_by_lkey = await _resolve_parcels(self.pool, uniq_streets)
 
         def group_key(row: dict[str, Any]) -> str:
+            lk = row.get("lkey")
+            parcel = parcel_by_lkey.get(lk) if lk else None
             jkey = row.get("jkey")
-            parcel = parcel_by_jkey.get(jkey) if jkey else None
             return f"parcel:{parcel}" if parcel else (f"addr:{jkey}" if jkey else f"raw:{id(row)}")
 
         # Reader A first (legal record) so it wins on shared fields; B fills bid.
@@ -452,8 +475,8 @@ class WayneForeclosureScraper(ListingScraper):
 
         listings: list[RawListing] = []
         for row in merged.values():
-            jkey = row.get("jkey")
-            parcel = parcel_by_jkey.get(jkey) if jkey else None
+            lk = row.get("lkey")
+            parcel = parcel_by_lkey.get(lk) if lk else None
             address = canonical_address(row.get("street_only") or row.get("address") or "") or row.get("address")
             if not address:
                 continue

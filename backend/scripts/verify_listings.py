@@ -73,7 +73,7 @@ _SELECT_COLS = """
     l.id, l.signal_type, l.source_site, l.property_address, l.property_city,
     l.property_zip, l.sale_date, l.opening_bid_usd, l.appraised_value_usd, l.case_number,
     l.case_status, l.match_confidence, l.match_method, l.status,
-    l.source_listing_id, l.address_status,
+    l.source_listing_id, l.address_status, l.auction_status,
     l.decedent_name, l.case_title, l.decedent_dod,
     (CURRENT_DATE - l.first_seen_at::date) AS lead_age_days,
     p.owner_name, p.current_market_value, p.current_tax_balance,
@@ -146,6 +146,36 @@ def _source_and_check(r: asyncpg.Record, market: dict) -> tuple[str, str]:
                    f"(4) Redfin/Zillow OFF-market = good (motivated, not yet listed)  -- {addr_hint}")
         else:
             chk = f"(1) MyPlace parcel {parcel} exists  (2) Redfin/Zillow check  -- {addr_hint}"
+    elif market["state"] == "MI":
+        # Wayne (Detroit) console CHECK lines — pto.waynecounty.com is the authority.
+        # MI mortgage foreclosure: 6-month redemption (MCL 600.3240) — a PAST sale_date is
+        # NOT stale while still inside the window (tagged 'in_redemption' in auction_status).
+        # Never flag in-redemption rows as STALE based on sale_date alone.
+        if sig == "mortgage_foreclosure":
+            chk = (f"(1) mipublicnotices.com: foreclosure notice still published OR sale_date within 6mo (MI in-redemption = VALID)  "
+                   f"(2) pto.waynecounty.com parcel {parcel}: current owner = private party (not lender/new buyer)  "
+                   f"(3) NOTE: a past sale_date is NOT stale — in-redemption rows are live leads  "
+                   f"(4) Redfin/Zillow off-market = good  -- {addr_hint}")
+        elif sig == "tax_delinquent_foreclosure":
+            chk = (f"(1) Wayne Treasurer auction: parcel {parcel} still active (STATUS_CD != RM = not removed/redeemed)  "
+                   f"(2) Equity = market value − min bid (NO post-sale redemption on tax-deed — clean title)  "
+                   f"(3) pto.waynecounty.com confirms delinquency still owed  "
+                   f"(4) Redfin/Zillow off-market = good  -- {addr_hint}")
+        elif sig == "land_bank_inventory":
+            chk = (f"(1) DLBA (buildingdetroit.org) or WCLB (waynecountylandbank.com): parcel {parcel} still listed (county/city-owned)  "
+                   f"(2) Off-market expected (government-owned — NOT on MLS)  "
+                   f"(3) Redfin/Zillow off-market = expected (county/city-owned)  -- {addr_hint}")
+        elif sig == "tax_delinquent":
+            chk = (f"PRE-DISTRESS LEAD: (1) pto.waynecounty.com parcel {parcel}: balance owed (forfeiture roll), owner = private party  "
+                   f"(2) NOT on the Treasurer auction (else it's a buy-now deal, not a lead)  "
+                   f"(3) Owner not recently transferred (still the distressed owner)  "
+                   f"(4) Redfin/Zillow OFF-market = good (motivated, not yet listed)  -- {addr_hint}")
+        elif sig == "blight_violation":
+            chk = (f"PRE-DISTRESS LEAD: (1) Detroit blight record: amt_balance_due > 0 on parcel {parcel}, owner = LLC/absentee  "
+                   f"(2) Owner not recently transferred (still holds the parcel)  "
+                   f"(3) Redfin/Zillow OFF-market = good (not listing despite neglect)  -- {addr_hint}")
+        else:
+            chk = f"(1) pto.waynecounty.com parcel {parcel} exists  (2) Redfin/Zillow check  -- {addr_hint}"
     else:
         # Shelby console CHECK lines — Trustee page is the universal verifier
         trustee_url = src if "shelbycountytrustee.com/Parcel" in src else "https://apps2.shelbycountytrustee.com/PropertyClient"
@@ -188,7 +218,13 @@ def _verdict(r: asyncpg.Record) -> tuple[str, list[str]]:
     if not fresh:
         return "STALE", [f"status={status}"]
     if r["sale_date"] is not None and r["sale_date"] < r["today"]:
-        return "STALE", ["sale_date in past"]
+        # MI mortgage foreclosure: a sheriff-deed is NOT final at sale — the owner redeems
+        # for 6 months (MCL 600.3240). wayne_foreclosure tags these auction_status=
+        # 'in_redemption'; they are LIVE off-market leads, not stale. (Only MI sets this tag;
+        # OH foreclosures stay 'scheduled'/NULL and still go STALE on a past sale_date.)
+        if (r["auction_status"] or "") != "in_redemption":
+            return "STALE", ["sale_date in past"]
+        notes.append("in redemption (MI 6mo, MCL 600.3240) — live lead, sale_date past is expected")
     cs = (r["case_status"] or "").lower()
     if signal == "probate" and cs and any(w in cs for w in _CLOSED):
         return "STALE", [f"case {r['case_status']}"]
@@ -253,6 +289,8 @@ def _layers(r: asyncpg.Record, market: dict) -> dict:
     # ---- Layer 1: deal source ----
     if market["state"] == "OH":
         layer1 = _build_layer1_cuyahoga(r, sig, parcel, case, first_seen_label)
+    elif market["state"] == "MI":
+        layer1 = _build_layer1_wayne(r, sig, source_site, parcel, case, first_seen_label, vguide)
     else:
         layer1 = _build_layer1_shelby(r, sig, source_site, parcel, case, first_seen_label,
                                       vguide, native_parcel_id=native_parcel_id)
@@ -284,6 +322,14 @@ def _layers(r: asyncpg.Record, market: dict) -> dict:
         ],
         "backup_links": (
             None if market["state"] == "OH"
+            else [
+                ("Detroit Open Data — Assessor Parcels",
+                 "https://data.detroitmi.gov/datasets/parcels"),
+                ("Detroit Open Data — Property Sales",
+                 "https://data.detroitmi.gov/datasets/property-sales"),
+                ("Wayne County Register of Deeds",
+                 "https://www.waynecounty.com/elected/clerk/register-of-deeds.aspx"),
+            ] if market["state"] == "MI"
             else [
                 ("Trustee Search (type address if no parcel link)",
                  "https://apps2.shelbycountytrustee.com/PropertyClient"),
@@ -680,6 +726,181 @@ def _build_layer1_shelby(r: asyncpg.Record, sig: str, source_site: str,
                 ("Signal Type", sig or "—"),
                 ("Parcel (14-digit canonical)", parcel),
                 ("Native Parcel ID (for Trustee URL)", native_id_label),
+                ("Source Site", source_site),
+            ],
+        }
+
+
+def _build_layer1_wayne(r: asyncpg.Record, sig: str, source_site: str,
+                         parcel: str, case: str | None, first_seen_label: str,
+                         vguide: dict) -> dict:
+    """Wayne County (Detroit, MI) Layer 1 — per signal type.
+
+    The Wayne County Treasurer property-tax lookup (pto.waynecounty.com) is the
+    UNIVERSAL cross-check authority for all Wayne categories: it shows current owner,
+    live delinquency/forfeiture status, and payment history in one place.
+
+    MI MORTGAGE FORECLOSURE CRITICAL NOTE (MCL 600.3240): a PAST sale_date is NOT a
+    kill here — the original owner has 6 months post-sale to redeem. Rows tagged
+    'in_redemption' in auction_status are LIVE leads, not stale ones. The Layer-1 source
+    is the mipublicnotices notice (pre-sale) or the in-redemption status (post-sale).
+    Never flag a Wayne mortgage_foreclosure row STALE solely because sale_date is past.
+    """
+    pto_base = "https://pto.waynecounty.com/"
+
+    if sig == "mortgage_foreclosure":
+        guide = vguide.get("mortgage_foreclosure", {})
+        auction_status = (r["auction_status"] if "auction_status" in r.keys() else None) or ""
+        in_redemption = "in_redemption" in auction_status.lower()
+        status_note = (
+            "POST-SALE IN-REDEMPTION — owner has up to 6 months from sale_date to redeem (MCL 600.3240). "
+            "This row is a LIVE lead (not stale). sale_date in the past is expected."
+            if in_redemption else
+            "PRE-SALE — foreclosure notice published on mipublicnotices (Detroit Legal News area=82). "
+            "Owner has until the sale date to redeem."
+        )
+        return {
+            "title": "Detroit Legal News / mipublicnotices — Mortgage Foreclosure Notice",
+            "url": "https://www.mipublicnotices.com/",
+            "search_for": (
+                "Search mipublicnotices.com (area=82, Wayne County) for the mortgagor name or property address. "
+                "Confirm the notice is still published (pre-sale) OR verify the sale_date and compute whether "
+                "the 6-month MI redemption window is still open (sale_date + 180 days >= today). "
+                f"STATUS: {status_note}"
+            ),
+            "look_for": (
+                f"{guide.get('valid', '')} "
+                f"Red flags: {guide.get('red_flags', '')}"
+            ),
+            "stored": [
+                ("Signal Type", "mortgage_foreclosure (MI 6-month redemption)"),
+                ("Parcel", parcel),
+                ("Source Site", source_site),
+                ("Sale Date (6-mo redemption window starts here)", str(r["sale_date"] or "—")),
+                ("In-Redemption / Auction Status", auction_status or "(pre-sale)"),
+                ("Property Address", r["property_address"] or "—"),
+                ("First Seen By Us", first_seen_label),
+                ("Owner (pto — should be original owner, not lender)", r["owner_name"] or "(not enriched)"),
+            ],
+        }
+    elif sig == "tax_delinquent_foreclosure":
+        guide = vguide.get("tax_delinquent_foreclosure", {})
+        return {
+            "title": "Wayne County Treasurer — Tax-Foreclosure Auction",
+            "url": "https://www.waynecountytreasurermi.com/",
+            "search_for": (
+                f"Open the Wayne County Treasurer auction and search for parcel '{parcel}'. "
+                "Confirm the row is still ACTIVE (STATUS_CD != RM). STATUS_CD=RM = removed/redeemed. "
+                "NOTE: Wayne tax auction issues a CLEAN fee-simple deed — NO post-sale redemption "
+                "(unlike MI mortgage foreclosures). Equity = market value − minimum bid."
+            ),
+            "look_for": (
+                f"{guide.get('valid', '')} "
+                f"Red flags: {guide.get('red_flags', '')}"
+            ),
+            "stored": [
+                ("Parcel", parcel),
+                ("Source Site", source_site),
+                ("Sale Date", str(r["sale_date"] or "—")),
+                ("Opening Bid (min bid)", f"${int(r['opening_bid_usd']):,}" if r["opening_bid_usd"] else "—"),
+                ("Case / Reference", case or "—"),
+                ("Property Address", r["property_address"] or "—"),
+                ("First Seen By Us", first_seen_label),
+                ("Owner (pto — confirm still delinquent)", r["owner_name"] or "(not enriched)"),
+            ],
+        }
+    elif sig == "land_bank_inventory":
+        guide = vguide.get("land_bank_inventory", {})
+        is_wclb = "Wayne County Land Bank" in source_site
+        if is_wclb:
+            layer_url = "https://www.waynecountylandbank.com/"
+            search_hint = (
+                f"Open the Wayne County Land Bank (ePropertyPlus portal) and search for parcel {parcel} "
+                f"or address '{r['property_address']}'. Confirm it is still listed FOR SALE (available='Y')."
+            )
+        else:
+            layer_url = "https://buildingdetroit.org/"
+            search_hint = (
+                f"Open buildingdetroit.org and search for address '{r['property_address']}' or parcel {parcel}. "
+                "Confirm the property is still in the for-sale inventory (Auction / Own It Now / Rehabbed & Ready, "
+                "or a buyable lot) and NOT in /pastlistings or marked 'Under Contract'."
+            )
+        return {
+            "title": ("Wayne County Land Bank — ePropertyPlus"
+                      if is_wclb else "Detroit Land Bank Authority (buildingdetroit.org)"),
+            "url": layer_url,
+            "search_for": search_hint,
+            "look_for": (
+                f"{guide.get('valid', '')} "
+                f"Red flags: {guide.get('red_flags', '')}"
+            ),
+            "stored": [
+                ("Parcel", parcel),
+                ("Source Site", source_site),
+                ("Property Address", r["property_address"] or "—"),
+                ("First Seen By Us", first_seen_label),
+                ("Owner (pto — should be DLBA / WCLB / City of Detroit)", r["owner_name"] or "(not enriched)"),
+            ],
+        }
+    elif sig == "tax_delinquent":
+        # Pre-Distress LEAD — pto.waynecounty.com is the authority (owner + forfeiture status).
+        guide = vguide.get("tax_delinquent", {})
+        return {
+            "title": "Wayne County Treasurer (pto) — Forfeiture / Delinquency Record",
+            "url": pto_base,
+            "search_for": (
+                f"PRE-DISTRESS LEAD (owner on Wayne Treasurer forfeiture roll, ≥2yr delinquent). "
+                f"Open pto.waynecounty.com and search for parcel '{parcel}' (keep trailing '.' or '-' exactly). "
+                "Confirm: balance owed > $0, owner is a PRIVATE party, parcel is NOT yet on the auction list "
+                "(if it is, it has escalated to a buy-now deal — note it)."
+            ),
+            "look_for": (
+                f"{guide.get('valid', '')} "
+                f"Red flags: {guide.get('red_flags', '')}"
+            ),
+            "stored": [
+                ("Signal Type", "tax_delinquent (Pre-Distress Lead — forfeiture roll)"),
+                ("Parcel", parcel),
+                ("Source Site", source_site),
+                ("Property Address", r["property_address"] or "—"),
+                ("First Seen By Us", first_seen_label),
+                ("Owner (pto — should be the distressed private owner)", r["owner_name"] or "(not enriched)"),
+            ],
+        }
+    elif sig == "blight_violation":
+        # Pre-Distress LEAD — Detroit Open Data blight tickets.
+        guide = vguide.get("blight_violation", {})
+        return {
+            "title": "Detroit Open Data — Blight Violations",
+            "url": "https://data.detroitmi.gov/datasets/blight-violations",
+            "search_for": (
+                f"PRE-DISTRESS LEAD (Detroit blight judgments unpaid). "
+                f"Search the Detroit blight-violation dataset for parcel {parcel} or address '{r['property_address']}'. "
+                "Confirm: amt_balance_due > 0, disposition is 'Responsible…', owner is an LLC or absentee. "
+                "Cross-check current owner on pto.waynecounty.com to confirm the same party still holds the parcel."
+            ),
+            "look_for": (
+                f"{guide.get('valid', '')} "
+                f"Red flags: {guide.get('red_flags', '')}"
+            ),
+            "stored": [
+                ("Signal Type", "blight_violation (Pre-Distress Lead)"),
+                ("Parcel", parcel),
+                ("Source Site", source_site),
+                ("Property Address", r["property_address"] or "—"),
+                ("First Seen By Us", first_seen_label),
+                ("Owner (pto — should be LLC/absentee, still on title)", r["owner_name"] or "(not enriched)"),
+            ],
+        }
+    else:
+        return {
+            "title": "Wayne County Treasurer (pto) — Parcel Lookup",
+            "url": pto_base,
+            "search_for": f"Search pto.waynecounty.com for parcel '{parcel}' and confirm owner + address.",
+            "look_for": "Confirm the parcel exists and address / owner match our stored data.",
+            "stored": [
+                ("Signal Type", sig or "—"),
+                ("Parcel", parcel),
                 ("Source Site", source_site),
             ],
         }

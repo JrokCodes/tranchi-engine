@@ -74,6 +74,7 @@ logger = logging.getLogger("source_check")
 # declares its endpoints there; the verifier functions below read them via these aliases.
 _OH_ENDPOINTS = MARKETS["cuyahoga"]["verifier_endpoints"]
 _TN_ENDPOINTS = MARKETS["shelby"]["verifier_endpoints"]
+_MI_ENDPOINTS = MARKETS["wayne"]["verifier_endpoints"]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # OH (Cuyahoga) constants — only ever used for rows where property_state='OH'
@@ -110,6 +111,20 @@ TN_ARCGIS_OWNER_FIELD = "OWNER"
 
 # Memphis MMLBA source site name (Airtable-backed; use DB-freshness fallback)
 TN_MMLBA_SOURCE_SITE = "Memphis MMLBA"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MI (Wayne) constants — only ever used for rows where property_state='MI'
+# ─────────────────────────────────────────────────────────────────────────────
+# Detroit Open Data ArcGIS parcel layer (matches the spine in tranchi.parcels market='wayne').
+MI_PARCELS_ARCGIS = _MI_ENDPOINTS["parcels_arcgis"]
+MI_BLIGHT_ARCGIS = _MI_ENDPOINTS["blight_arcgis"]
+MI_MIPUBLICNOTICES_API = _MI_ENDPOINTS["mipublicnotices_api"]
+MI_DLBA_API = _MI_ENDPOINTS["dlba_api"]
+MI_WCLB_API = _MI_ENDPOINTS["wclb_api"]
+# Wayne County Treasurer PTO (the cross-cut registry authority for MI, mirrors MyPlace/ArcGIS roles)
+MI_PTO_BASE = _MI_ENDPOINTS["pto_base"]
+# Wayne County source site strings (exact values from market_config source_sites)
+MI_WCLB_SOURCE_SITE = "Wayne County Land Bank"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Shared constants
@@ -682,6 +697,144 @@ async def verify_tn_arcgis(client: httpx.AsyncClient, row: dict) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# MI (Wayne): Detroit Open Data ArcGIS parcel cross-cut registry check
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def verify_mi_arcgis(client: httpx.AsyncClient, row: dict) -> dict:
+    """MI cross-cut: query Detroit Open Data ArcGIS parcel layer and confirm parcel exists.
+
+    Detroit parcel formats have significant trailing characters (e.g. '02000184.' or
+    '03001910.001') — these are stored verbatim in tranchi.parcels and must be passed
+    as-is to the ArcGIS parcelnum field. No canonical conversion required (unlike Shelby).
+
+    Checks:
+      1. The parcel exists in the Detroit Open Data FeatureServer parcel layer.
+      2. If owner_name is stored, the first token is a soft match against the OWNERNAME field.
+         A mismatch is evidenced (ownership may have changed) but does NOT hard-fail.
+
+    Falls back to DB-freshness for out-county 14-digit parcels (county layer is ~9 years
+    stale per the market config note; the Detroit-only assessor spine is the real authority).
+    Returns ERROR gracefully on ArcGIS failures (non-crash).
+    """
+    parcel = (row.get("source_listing_id") or "").strip()
+    expected_owner = (row.get("owner_name") or "").strip()
+    if not parcel:
+        return {"verdict": "FAIL", "evidence": "no source_listing_id stored"}
+
+    params = {
+        "where": f"parcelnum = '{parcel}'",
+        "outFields": "parcelnum,address,OWNERNAME",
+        "returnGeometry": "false",
+        "resultRecordCount": "3",
+        "f": "json",
+    }
+
+    try:
+        r = await client.get(
+            MI_PARCELS_ARCGIS,
+            params=params,
+            timeout=30,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                ),
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+            },
+        )
+    except Exception as e:
+        return {"verdict": "ERROR", "evidence": f"Detroit ArcGIS parcels fetch error: {str(e)[:120]}"}
+
+    try:
+        data = r.json()
+    except Exception:
+        return {"verdict": "ERROR", "evidence": f"Detroit ArcGIS non-JSON response (status={r.status_code})"}
+
+    if "error" in data:
+        err_msg = data["error"].get("message", str(data["error"]))[:100]
+        return {"verdict": "ERROR", "evidence": f"Detroit ArcGIS API error: {err_msg}"}
+
+    features = data.get("features") or []
+    if not features:
+        return {
+            "verdict": "FAIL",
+            "evidence": f"parcel {parcel!r} not found in Detroit Open Data ArcGIS parcel layer",
+        }
+
+    # Parcel exists — soft owner check
+    signals: list[str] = [f"parcel {parcel!r} found in Detroit Open Data ArcGIS"]
+    if expected_owner:
+        first_token = expected_owner.split(",")[0].strip().split(" ")[0].upper()
+        if first_token:
+            live_owner = ""
+            for feat in features:
+                attrs = feat.get("attributes") or {}
+                live_owner = (attrs.get("OWNERNAME") or "").strip().upper()
+                if live_owner:
+                    break
+            if first_token in live_owner:
+                signals.append(f"owner token '{first_token}' ✓")
+            else:
+                signals.append(
+                    f"owner token '{first_token}' not in ArcGIS OWNERNAME='{live_owner[:40]}' "
+                    "(ownership may have changed)"
+                )
+
+    return {"verdict": "PASS", "evidence": "Detroit ArcGIS: " + ", ".join(signals)}
+
+
+async def verify_mi_mipublicnotices(client: httpx.AsyncClient, row: dict) -> dict:
+    """MI mortgage_foreclosure: check via DB-freshness fallback.
+
+    mipublicnotices.com (Detroit Legal News area=82) serves the foreclosure notice.
+    Live per-row re-fetch is impractical without Playwright (the site uses JS rendering).
+
+    MI REDEMPTION NOTE (MCL 600.3240): a PAST sale_date within 180 days is still a VALID
+    in-redemption lead. We do NOT check sale_date here — the existing _verdict() function
+    correctly handles the in-redemption carve-out via auction_status. This function only
+    confirms freshness of the stored record, not the redemption window itself.
+    """
+    return await verify_tn_freshness_fallback(
+        row,
+        "Wayne County Foreclosure (mipublicnotices — live per-row re-fetch requires Playwright; "
+        "MI 6-month redemption: a past sale_date within 180d is VALID in-redemption, not stale)",
+    )
+
+
+async def verify_mi_dlba(client: httpx.AsyncClient, row: dict) -> dict:
+    """MI land_bank_inventory (Detroit Land Bank — buildingdetroit.org): DB-freshness fallback.
+
+    buildingdetroit.org is a Nuxt/React SPA — per-row live scraping requires Playwright.
+    The wayne_dlba scraper does a full rescan on each run (staleness_policy='full_rescan'),
+    so a fresh last_seen_at means the scraper confirmed the property was still in the
+    for-sale layer on its last run. Wayne County Land Bank (ePropertyPlus) is scriptable
+    but low-volume; both fall to freshness here for simplicity.
+    """
+    source_site = (row.get("source_site") or "").strip()
+    label = (
+        "Wayne County Land Bank (ePropertyPlus — stored-state check; full_rescan scraper)"
+        if MI_WCLB_SOURCE_SITE in source_site
+        else "Detroit Land Bank Authority buildingdetroit.org (SPA — live re-fetch requires Playwright; full_rescan scraper)"
+    )
+    return await verify_tn_freshness_fallback(row, label)
+
+
+async def verify_mi_tax_auction(client: httpx.AsyncClient, row: dict) -> dict:
+    """MI tax_delinquent_foreclosure: DB-freshness fallback.
+
+    The Wayne County Treasurer auction API (waynecountytreasurermi.com) is scriptable
+    but the wayne_tax_auction scraper ships dormant (seasonal, opened only during the
+    Sept auction window). Per-row live re-check is deferred until the scraper is active.
+    Falls to freshness; evidence clearly marks this as stored-state.
+    """
+    return await verify_tn_freshness_fallback(
+        row,
+        "Wayne County Treasurer's Auction (seasonal scraper ships dormant; "
+        "live re-check deferred until auction window is open)",
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Orchestration — market-aware dispatch
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -752,6 +905,36 @@ async def verify_one(row: dict, client: httpx.AsyncClient) -> dict:
         else:
             src_result = {"verdict": "ERROR", "evidence": f"no TN verifier for signal_type={sig}"}
 
+    elif state == "MI":
+        # ── MI (Wayne County / Detroit) source verifiers ──────────────────────
+        if sig == "mortgage_foreclosure":
+            # mipublicnotices.com requires Playwright for per-row live re-fetch.
+            # MI REDEMPTION (MCL 600.3240): a PAST sale_date within 180d is VALID (in-redemption).
+            # The stored auction_status='in_redemption' tag carries this; _verdict() must NOT
+            # flag a Wayne mortgage_foreclosure STALE solely because sale_date is past.
+            src_result = await verify_mi_mipublicnotices(client, row)
+        elif sig == "land_bank_inventory":
+            # DLBA is a Nuxt SPA; WCLB ePropertyPlus is scriptable but low-volume.
+            # Both use full_rescan scraper → freshness is the honesty-preserving fallback.
+            src_result = await verify_mi_dlba(client, row)
+        elif sig == "tax_delinquent_foreclosure":
+            # Seasonal scraper ships dormant — defer live re-check until auction window open.
+            src_result = await verify_mi_tax_auction(client, row)
+        elif sig in ("tax_delinquent", "blight_violation"):
+            # Pre-distress LEADS (distress_stage='distress_signal'). No clean per-row live
+            # web source to re-fetch (Treasurer forfeiture PDF / Detroit Open Data blight DELTA).
+            # The wayne_delinquent_tax / wayne_blight scrapers refresh last_seen_at while the
+            # signal is fresh. The ArcGIS registry cross-cut below confirms the owner hasn't
+            # changed (not sold). Freshness + registry = the lead-verify approach.
+            label = (
+                "Wayne Tax Delinquent lead (Treasurer forfeiture roll — no clean per-row live re-fetch)"
+                if sig == "tax_delinquent"
+                else "Wayne Blight Violation lead (Detroit Open Data DELTA — stored-state check)"
+            )
+            src_result = await verify_tn_freshness_fallback(row, label)
+        else:
+            src_result = {"verdict": "ERROR", "evidence": f"no MI verifier for signal_type={sig}"}
+
     else:
         src_result = {"verdict": "ERROR", "evidence": f"unknown property_state={state!r}"}
 
@@ -761,6 +944,10 @@ async def verify_one(row: dict, client: httpx.AsyncClient) -> dict:
         reg_label = "myplace"
     elif state == "TN":
         reg_result = await verify_tn_arcgis(client, row)
+        reg_label = "arcgis"
+    elif state == "MI":
+        # Detroit Open Data ArcGIS parcel layer (the spine authority for tranchi.parcels market='wayne').
+        reg_result = await verify_mi_arcgis(client, row)
         reg_label = "arcgis"
     else:
         reg_result = {"verdict": "ERROR", "evidence": f"unknown property_state={state!r}"}
