@@ -584,6 +584,24 @@ async def _upsert_one(
             listing.source_site,
             norm_parcel,
         )
+        if existing_id is None:
+            # NULL→parcel transition: a row first ingested WITHOUT a parcel (e.g. a
+            # foreclosure notice before its address→spine resolution succeeded) must UPDATE
+            # its address-twin once the parcel later resolves — NOT insert a duplicate that
+            # the redemption/staleness carve-outs then keep alive forever. Fall back to the
+            # documented (source_site, property_address, sale_date) key before inserting.
+            existing_id = await conn.fetchval(
+                """
+                SELECT id FROM tranchi.listings
+                WHERE source_site = $1
+                  AND property_address = $2
+                  AND sale_date IS NOT DISTINCT FROM $3
+                LIMIT 1
+                """,
+                listing.source_site,
+                canon_addr,
+                listing.sale_date,
+            )
     else:
         existing_id = await conn.fetchval(
             """
