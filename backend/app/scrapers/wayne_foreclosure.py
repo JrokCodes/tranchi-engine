@@ -495,7 +495,7 @@ class WayneForeclosureScraper(ListingScraper):
                 auction_status=_auction_status(row.get("sale_date"), row.get("trustee_sale")),
             ))
         logger.info("WayneForeclosure: returning %d merged listings (A=%d, B=%d, parcels=%d)",
-                    len(listings), len(reader_a), len(reader_b), len(parcel_by_jkey))
+                    len(listings), len(reader_a), len(reader_b), len(parcel_by_lkey))
         return listings
 
 
