@@ -944,7 +944,9 @@ def _make_wayne_market() -> dict:
     return {
         "db": "tranchi",
         "state": "MI",
-        "state_filter": "l.property_state = 'MI'",
+        # Verify sample scope is by the county-level `market` column, not state (mirrors the
+        # other markets since c557b57 — two same-state markets must not cross-contaminate).
+        "market_filter": "l.market = 'wayne'",
         # Pre-distress lead surfacing (surface_distress.py). Wayne sources the lead ADDRESS from
         # the parcel SPINE (Detroit assessor situs is well-covered). gate_sql is held loose here;
         # the DEFENSIBLE-SLICE tightening (blight In-Collections/multi-ticket floor; forfeiture
