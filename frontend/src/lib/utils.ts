@@ -77,24 +77,28 @@ export function sourceBadgeClass(site: string): string {
 }
 
 // ─── Markets ────────────────────────────────────────────────────────────────
-// The dashboard serves three markets. Filtering keys on property_county
+// The dashboard serves four markets. Filtering keys on property_county
 // (the API _build_where does an ILIKE on l.property_county).
 export interface Market { label: string; county: string; }
 export const MARKETS: Market[] = [
   { label: 'Cuyahoga (OH)', county: 'Cuyahoga' },
   { label: 'Shelby–Memphis (TN)', county: 'Shelby' },
   { label: 'Summit–Akron (OH)', county: 'Summit' },
+  { label: 'Wayne–Detroit (MI)', county: 'Wayne' },
 ];
 
 // Scope a source_site to a market by name. Shelby/Memphis sources name the county
-// or city; Summit/Akron sources name Summit or Akron; everything else is Cuyahoga.
-// (No Cuyahoga or Shelby source name contains 'Summit'/'Akron', so this stays disjoint.)
+// or city; Summit/Akron name Summit or Akron; Wayne/Detroit name Wayne or Detroit;
+// everything else is Cuyahoga. (Names stay disjoint — no Cuyahoga/Shelby/Summit source
+// contains 'Wayne'/'Detroit', and vice-versa.)
 export function sourceInCounty(site: string, county: string): boolean {
   const isShelby = site.includes('Shelby') || site.includes('Memphis') || site.includes('MMLBA');
   const isSummit = site.includes('Summit') || site.includes('Akron');
+  const isWayne = site.includes('Wayne') || site.includes('Detroit');
   if (county === 'Shelby') return isShelby;
   if (county === 'Summit') return isSummit;
-  return !isShelby && !isSummit;  // Cuyahoga = neither
+  if (county === 'Wayne') return isWayne;
+  return !isShelby && !isSummit && !isWayne;  // Cuyahoga = none of the above
 }
 
 // External "verify" link per market. Shelby's universal verifier is the County Trustee
@@ -127,6 +131,16 @@ export function buildVerifyLink(
     return {
       label: 'Find on Summit Fiscal Office',
       href: 'https://fiscaloffice.summitoh.net/index.php/property-search',
+    };
+  }
+  if (county === 'Wayne') {
+    // Wayne/Detroit current-owner + live-delinquency authority is the Treasurer's pto
+    // portal (search by parcel/address; no stable per-parcel deep-link param). NEVER use a
+    // Zillow "sold" banner as a kill — pto + the Detroit assessor are the truth. The
+    // per-listing source links from the API cover source verification.
+    return {
+      label: 'Verify on Wayne County (pto)',
+      href: 'https://pto.waynecounty.com/',
     };
   }
   return null;
