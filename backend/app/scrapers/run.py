@@ -578,25 +578,30 @@ async def _dedup_cross_source_listings(pool: asyncpg.Pool) -> int:
                     END
                 """
             )
-            # SAFETY-NET (foreclosure cross-source): a NULL-parcel foreclosure row
-            # keys on normalized_address while its parcel-bearing twin keys on the
-            # parcel, so the pass above never collapses them (RealAuction<->ALN show
-            # the same sheriff sale twice). Attach the null-parcel row to the
-            # parcel-bearing canonical that shares the SAME normalized_address AND the
-            # same case (digit-core compare, so a 'CV…A' re-notice suffix or a source
-            # prefix still matches), and ONLY when exactly ONE such canonical exists.
-            # Scoped to null-parcel foreclosure rows. NEVER match on case alone — a
-            # Shelby TS#### tax-sale case covers thousands of parcels; requiring the
-            # address too means one sheriff/mortgage case = one property. Runs after
-            # the main pass each cycle (idempotent: main pass may reset the orphan to
-            # canonical-of-its-address-cluster, this re-points it).
+            # SAFETY-NET (foreclosure cross-source): a foreclosure row that is NOT a
+            # clean atomic parcel — either a NULL parcel (RealAuction failed to resolve)
+            # OR a raw multi-parcel STRING (ALN '68-19967 & 68-19968', an unsplit leftover)
+            # — keys on normalized_address instead of a parcel, so the main pass never
+            # collapses it onto its parcel-bearing twin (RealAuction<->ALN show the same
+            # sheriff sale twice). Attach such a row to the parcel-bearing canonical that
+            # shares the SAME normalized_address AND the same case (digit-core compare, so a
+            # 'CV…A' re-notice suffix or a source prefix still matches), ONLY when exactly
+            # ONE *clean atomic* canonical exists.
+            # INVARIANT — a source_listing_id containing '&', ',' or a space is a raw
+            # multi-parcel string, NOT a parcel: it must never count as a canonical (it
+            # breaks the uniqueness guard, leaving the null twin un-collapsed) and must
+            # itself be collapsed into the clean single-parcel row. NEVER match on case
+            # alone — a Shelby TS#### tax-sale case covers thousands of parcels; requiring
+            # the address too means one sheriff/mortgage case = one property. Runs after the
+            # main pass each cycle (idempotent).
             await conn.execute(
                 """
                 UPDATE tranchi.listings o
                 SET duplicate_of = c.id
                 FROM tranchi.listings c
                 WHERE o.status IN ('active', 'not_listed')
-                  AND NULLIF(o.source_listing_id, '') IS NULL
+                  AND (NULLIF(o.source_listing_id, '') IS NULL
+                       OR o.source_listing_id ~ '[&, ]')
                   AND o.duplicate_of IS NULL
                   AND o.signal_type LIKE '%foreclosure%'
                   AND o.case_number IS NOT NULL
@@ -604,6 +609,7 @@ async def _dedup_cross_source_listings(pool: asyncpg.Pool) -> int:
                   AND regexp_replace(o.case_number, '[^0-9]', '', 'g') <> ''
                   AND c.status IN ('active', 'not_listed')
                   AND NULLIF(c.source_listing_id, '') IS NOT NULL
+                  AND c.source_listing_id !~ '[&, ]'
                   AND c.duplicate_of IS NULL
                   AND c.case_number IS NOT NULL
                   AND c.id <> o.id
@@ -615,6 +621,7 @@ async def _dedup_cross_source_listings(pool: asyncpg.Pool) -> int:
                         SELECT count(*) FROM tranchi.listings c2
                         WHERE c2.status IN ('active', 'not_listed')
                           AND NULLIF(c2.source_listing_id, '') IS NOT NULL
+                          AND c2.source_listing_id !~ '[&, ]'
                           AND c2.duplicate_of IS NULL
                           AND c2.normalized_address = o.normalized_address
                           AND regexp_replace(c2.case_number, '[^0-9]', '', 'g')
