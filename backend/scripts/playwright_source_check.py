@@ -721,9 +721,12 @@ async def verify_mi_arcgis(client: httpx.AsyncClient, row: dict) -> dict:
     if not parcel:
         return {"verdict": "FAIL", "evidence": "no source_listing_id stored"}
 
+    # Detroit parcel_file_current layer fields are parcel_id + taxpayer_1 (owner), verified
+    # against the live layer + wayne_parcels.py 2026-06-17. The old 'parcelnum'/'OWNERNAME'
+    # names 400'd, silently erroring this registry cross-check (docs-vs-live drift).
     params = {
-        "where": f"parcelnum = '{parcel}'",
-        "outFields": "parcelnum,address,OWNERNAME",
+        "where": f"parcel_id = '{parcel}'",
+        "outFields": "parcel_id,address,taxpayer_1",
         "returnGeometry": "false",
         "resultRecordCount": "3",
         "f": "json",
@@ -769,14 +772,14 @@ async def verify_mi_arcgis(client: httpx.AsyncClient, row: dict) -> dict:
             live_owner = ""
             for feat in features:
                 attrs = feat.get("attributes") or {}
-                live_owner = (attrs.get("OWNERNAME") or "").strip().upper()
+                live_owner = (attrs.get("taxpayer_1") or "").strip().upper()
                 if live_owner:
                     break
             if first_token in live_owner:
                 signals.append(f"owner token '{first_token}' ✓")
             else:
                 signals.append(
-                    f"owner token '{first_token}' not in ArcGIS OWNERNAME='{live_owner[:40]}' "
+                    f"owner token '{first_token}' not in ArcGIS taxpayer_1='{live_owner[:40]}' "
                     "(ownership may have changed)"
                 )
 
