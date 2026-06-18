@@ -73,6 +73,19 @@ def upgrade() -> None:
         """
     )
 
+    # 3b) surface_distress joins listings.source_listing_id = signals.parcel_number in its
+    #     insert/retire/refresh NOT-EXISTS anti-joins (+ the tiering UPDATE). Without an index
+    #     here the planner mis-estimates the JSONB-gated signal count as rows=1 and picks a
+    #     nested-loop anti-join that re-scans the ~15k active buy-now listings PER gate-passing
+    #     blight signal (~46k) ≈ 680M comparisons → a 10-min query that would hang the 3h cron.
+    #     This index makes it a per-row index probe. General (helps every market's surfacing).
+    op.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tranchi_listings_source_listing_id
+            ON tranchi.listings (source_listing_id)
+        """
+    )
+
     # 4) Register the blight LEAD type, DISABLED. signal_source='detroit_blight_tickets' scopes
     #    it to the Detroit blight signal feed; source_site matches market_config source_sites.
     op.execute(
@@ -89,6 +102,7 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.execute("DELETE FROM tranchi.distress_lead_types WHERE market='wayne' AND signal_type='blight_violation'")
+    op.execute("DROP INDEX IF EXISTS tranchi.idx_tranchi_listings_source_listing_id")
     op.execute("DROP INDEX IF EXISTS tranchi.idx_tranchi_signals_parcel_type_source")
     op.execute("DROP INDEX IF EXISTS tranchi.idx_tranchi_listings_conviction_tier")
     op.execute(

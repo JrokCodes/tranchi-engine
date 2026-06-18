@@ -85,9 +85,15 @@ _ABSENTEE_PER_TICKET = (
 
 
 def _agg_cte() -> str:
-    """Per-parcel aggregate of floor-passing, fresh blight tickets."""
+    """Per-parcel aggregate of floor-passing, fresh blight tickets.
+
+    AS MATERIALIZED is REQUIRED: this CTE is referenced once, so PG12+ would inline it into
+    the UPDATE join and — because the JSONB gate makes the planner mis-estimate the row count
+    as 1 — re-run the 204k-row signal seq scan PER listing row (~10-min hang). Materializing
+    computes the aggregate ONCE (~few s), then the UPDATE index-joins on source_listing_id.
+    """
     return f"""
-        WITH agg AS (
+        WITH agg AS MATERIALIZED (
             SELECT s.parcel_number,
                    count(*)                              AS tickets,
                    sum((s.payload->>'amt_balance_due')::numeric) AS total_bal,
