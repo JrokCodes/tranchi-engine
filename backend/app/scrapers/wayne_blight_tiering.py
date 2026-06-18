@@ -9,8 +9,11 @@ tickets and writes:
 
   blight_ticket_count  count of floor-passing tickets on the parcel
   blight_total_balance sum of amt_balance_due across those tickets
-  absentee_owner       owner-mailing zip5 != situs zip5 (motivated-seller signal)
-  conviction_tier      A (2+ tickets AND >=$2k AND absentee)
+  absentee_owner       owner-mailing zip5 != situs zip5 (informational badge/filter only —
+                       ticket-derived + point-in-time, so NOT a tier gate; the spine carries no
+                       Wayne mailing data to cross-check, and skeptic verify 2026-06-17 found it
+                       over-flags owner-occupants. It stays a displayed/filterable attribute.)
+  conviction_tier      A (2+ tickets AND >=$2k)   — the two objective, blight-layer-verifiable signals
                        B (2+ tickets AND >=$500)
                        C (otherwise — single floor-passing ticket / low balance)
 
@@ -125,7 +128,7 @@ async def tier_wayne_blight_leads(pool: asyncpg.Pool, *, dry_run: bool = False) 
                 _agg_cte() + """
                 SELECT
                     CASE
-                        WHEN tickets >= $1 AND total_bal >= $2 AND absentee THEN 'A'
+                        WHEN tickets >= $1 AND total_bal >= $2 THEN 'A'
                         WHEN tickets >= $3 AND total_bal >= $4 THEN 'B'
                         ELSE 'C'
                     END AS tier,
@@ -147,7 +150,7 @@ async def tier_wayne_blight_leads(pool: asyncpg.Pool, *, dry_run: bool = False) 
                 absentee_owner       = agg.absentee,
                 conviction_tier      = CASE
                     WHEN agg.tickets >= {_TIER_A_TICKETS} AND agg.total_bal >= {_TIER_A_BALANCE}
-                         AND agg.absentee THEN 'A'
+                         THEN 'A'
                     WHEN agg.tickets >= {_TIER_B_TICKETS} AND agg.total_bal >= {_TIER_B_BALANCE}
                          THEN 'B'
                     ELSE 'C'
