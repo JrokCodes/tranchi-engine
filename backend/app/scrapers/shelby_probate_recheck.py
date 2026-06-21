@@ -182,6 +182,9 @@ async def main() -> int:
     parser.add_argument("--end", type=int, default=None)
     parser.add_argument("--backfill", action="store_true", help="walk seed..cursor")
     parser.add_argument("--recent", type=int, default=None, help="walk last N ids before cursor")
+    parser.add_argument("--cover-active", action="store_true",
+                        help="walk oldest-active-case..cursor — guarantees every active "
+                             "listing is rechecked (no CLOSED case can hide below a fixed floor)")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -192,11 +195,28 @@ async def main() -> int:
     tmp = await asyncpg.create_pool(database_url, min_size=1, max_size=1)
     try:
         cursor = await _cursor(tmp)
+        # Oldest still-active case id, for --cover-active. case_number is 'PR0NNNNN'.
+        min_active_cn = await tmp.fetchval(
+            "SELECT min(case_number) FROM tranchi.listings "
+            "WHERE source_site = $1 AND signal_type = 'probate' AND status = 'active'",
+            SITE_NAME,
+        )
     finally:
         await tmp.close()
 
     if args.start is not None and args.end is not None:
         start, end = args.start, args.end
+    elif args.cover_active:
+        # Floor at the OLDEST active case, not a fixed cursor-N window. The --recent 3000
+        # floor left ~485 of the oldest active cases unrechecked (active span ~3485 > 3000),
+        # so CLOSED cases sat active indefinitely (probate_validity flag). This bounds work to
+        # exactly the active span and can never miss an active case.
+        floor = _SEED_ID + 1
+        if min_active_cn:
+            digits = "".join(ch for ch in min_active_cn if ch.isdigit())
+            if digits:
+                floor = max(_SEED_ID + 1, int(digits))
+        start, end = floor, cursor
     elif args.recent:
         start, end = max(_SEED_ID + 1, cursor - args.recent), cursor
     else:
