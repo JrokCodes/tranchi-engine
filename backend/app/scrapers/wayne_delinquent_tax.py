@@ -51,7 +51,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-import httpx
+from curl_cffi.requests import AsyncSession
 
 from app.scrapers.base import SignalScraper
 from app.scrapers.db import normalize_parcel_number
@@ -361,23 +361,26 @@ class WayneDelinquentTaxScraper(SignalScraper):
         pdf_parser = _load_pdf_parser()
 
         logger.info("WayneDelinquentTax: downloading forfeiture PDF from %s", _PDF_URL)
+        # waynecountymi.gov's WAF blocks httpx even with a full Chrome header set (it
+        # fingerprints the TLS/JA3 handshake, not just headers) — every 3h cycle 403'd.
+        # curl_cffi impersonates Chrome's real TLS stack, which clears it (verified
+        # 2026-06-21: 200 OK, 12.7MB). If this 403s again the WAF escalated further —
+        # next rung is a residential proxy; the signal is annual + redundant so disable.
         try:
-            async with httpx.AsyncClient(
-                headers=_CHROME_HEADERS,
-                follow_redirects=True,
-                timeout=_TIMEOUT,
-            ) as client:
-                resp = await client.get(_PDF_URL)
-                resp.raise_for_status()
-                pdf_bytes = resp.content
-        except httpx.HTTPStatusError as exc:
-            logger.error(
-                "WayneDelinquentTax: HTTP %d downloading PDF — WAF headers may have changed: %s",
-                exc.response.status_code, exc,
-            )
-            return []
-        except httpx.RequestError as exc:
-            logger.error("WayneDelinquentTax: network error downloading PDF: %s", exc)
+            async with AsyncSession() as client:
+                resp = await client.get(
+                    _PDF_URL, impersonate="chrome",
+                    headers=_CHROME_HEADERS, timeout=_TIMEOUT,
+                )
+            if resp.status_code != 200:
+                logger.error(
+                    "WayneDelinquentTax: HTTP %d downloading PDF — WAF may have escalated "
+                    "past curl_cffi impersonation: %s", resp.status_code, _PDF_URL,
+                )
+                return []
+            pdf_bytes = resp.content
+        except Exception as exc:  # noqa: BLE001 — best-effort scraper, never crash the run
+            logger.error("WayneDelinquentTax: error downloading PDF (curl_cffi): %s", exc)
             return []
 
         logger.info("WayneDelinquentTax: downloaded %d bytes; parsing PDF", len(pdf_bytes))
