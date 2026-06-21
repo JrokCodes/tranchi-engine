@@ -113,6 +113,12 @@ class ListingItem(BaseModel):
     signal_type_count: int
     is_hot: bool
     # Parcel fields (null if no parcel match)
+    # registry_confirmed=False => the listing's parcel has NO record in tranchi.parcels
+    # (the independent county-registry cross-check is absent). Currently this is the
+    # out-county Wayne set (WCLB land bank + out-county foreclosures): the parcel spine is
+    # Detroit-only, so these valid-from-source listings can't join. owner_name then reads
+    # '(Owner not found)'. Frontend should badge these "unconfirmed — not in county registry".
+    registry_confirmed: bool
     owner_name: str | None
     situs_address: str | None
     current_market_value: float | None
@@ -294,6 +300,7 @@ def _row_to_item(r: asyncpg.Record) -> ListingItem:
         current_market_value=_to_float(r["current_market_value"]),
         current_tax_balance=_to_float(r["current_tax_balance"]),
         delinquent_flag=bool(r["delinquent_flag"]) if r["delinquent_flag"] is not None else False,
+        registry_confirmed=bool(r["registry_confirmed"]),
         street_view_url=build_street_view_url(
             address=r["property_address"],
             city=r["property_city"],
@@ -361,6 +368,7 @@ _BASE_SELECT = """
         COALESCE(sig.n, 0)              AS signal_count,
         sig.type_counts                 AS type_counts,
         COALESCE(p.owner_name, '(Owner not found)') AS owner_name,
+        (p.owner_name IS NOT NULL)      AS registry_confirmed,
         p.situs_address,
         p.current_market_value,
         p.current_tax_balance,
