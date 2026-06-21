@@ -1079,17 +1079,10 @@ def _send_telegram(message: str) -> None:
     if not _TELEGRAM_TOKEN_PATH.exists():
         logger.info("Telegram token not at %s — alert suppressed.", _TELEGRAM_TOKEN_PATH)
         return
-    try:
-        token = _TELEGRAM_TOKEN_PATH.read_text().strip()
-        r = httpx.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": _TELEGRAM_CHAT_ID, "text": message},
-            timeout=10,
-        )
-        r.raise_for_status()
+    # Shared notifier chunks to <=4096 chars (Telegram's hard limit). See app/notify.py.
+    from app.notify import send_telegram
+    if send_telegram(message):
         logger.info("Telegram alert sent.")
-    except Exception as exc:
-        logger.error("Telegram send failed (non-fatal): %s", exc)
 
 
 def _format_telegram_alert(results: list[dict], elapsed: float) -> str:

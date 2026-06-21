@@ -89,18 +89,11 @@ def _send_telegram(message: str) -> None:
             _TELEGRAM_TOKEN_PATH,
         )
         return
-    try:
-        import httpx
-        token = _TELEGRAM_TOKEN_PATH.read_text().strip()
-        r = httpx.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": _TELEGRAM_CHAT_ID, "text": message},
-            timeout=10,
-        )
-        r.raise_for_status()
+    # Route through the shared notifier — it chunks to <=4096 chars. The digest grew to
+    # 5,252 chars and every nightly send 400'd silently (2026-06-21). See app/notify.py.
+    from app.notify import send_telegram
+    if send_telegram(message):
         logger.info("Telegram digest sent.")
-    except Exception as exc:
-        logger.error("Telegram send failed (non-fatal): %s", exc)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

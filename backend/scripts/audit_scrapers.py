@@ -534,18 +534,11 @@ def _send_telegram(message: str) -> None:
                 return
     except (ValueError, OSError):
         pass
-    try:
-        token = _TELEGRAM_TOKEN_PATH.read_text().strip()
-        with httpx.Client(timeout=10.0) as c:
-            r = c.post(
-                f"https://api.telegram.org/bot{token}/sendMessage",
-                json={"chat_id": _TELEGRAM_CHAT_ID, "text": message},
-            )
-            r.raise_for_status()
+    # Shared notifier chunks to <=4096 chars (Telegram's hard limit). See app/notify.py.
+    from app.notify import send_telegram
+    if send_telegram(message):
         _COOLDOWN_FILE.write_text(str(time.time()))
         logger.info("Telegram alert sent.")
-    except Exception as exc:
-        logger.error("Telegram send failed (non-fatal): %s", exc)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

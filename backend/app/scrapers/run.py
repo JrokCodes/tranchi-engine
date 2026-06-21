@@ -62,6 +62,7 @@ from app.scrapers.code_violations import (  # noqa: E402
 )
 from app.scrapers.db import upsert_listings  # noqa: E402
 from app.scrapers.surface_distress import surface_distress_leads  # noqa: E402
+from app.scrapers.collapse_guard import check_and_alert_collapse  # noqa: E402
 from app.scrapers.wayne_blight_tiering import tier_wayne_blight_leads  # noqa: E402
 from app.scrapers.delinquent_tax import DelinquentTaxScraper  # noqa: E402
 from app.scrapers.dln import DLNScraper  # noqa: E402
@@ -1171,6 +1172,13 @@ async def main() -> int:
                 redeem_win, mi_redeem, finalized, dupes,
             )
             logger.info("Post-run: blight-tiers %s", blight_tiers.get("tier_split", blight_tiers))
+
+            # Collapse tripwire: page immediately if any source's active count cratered
+            # vs its previous run (the safety net missing on 2026-06-21 when blight went
+            # 43,718 -> 6 and the once-daily audit missed it). Never raises.
+            collapses = await check_and_alert_collapse(pool)
+            if collapses:
+                logger.warning("Post-run: collapse tripwire fired for %d source(s)", collapses)
 
         total_errors = sum(r.errors for r in results)
         return 1 if total_errors > 0 else 0
