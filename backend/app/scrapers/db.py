@@ -386,6 +386,69 @@ def normalize_parcel_number(raw: str | None) -> str | None:
     return stripped.upper()
 
 
+def normalize_parcel_lucas(raw: str | None) -> str | None:
+    """Normalize a LUCAS COUNTY (OH / Toledo) parcel to its canonical PARID form.
+
+    Lucas's canonical deal parcel is PARID = 7-digit zero-padded numeric STRING
+    (e.g. '1210314', '0100001'). Leading zeros are load-bearing — string-compare only.
+      - Auditor AREIS (the spine) emits PARID already 7-digit.
+      - RealAuction / Toledo Legal News DISPLAY inserts a dash: '12-10314' → strip → '1210314'.
+      - 96 condo/split parcels carry an 8-digit base + 'S' suffix (e.g. '04349092S',
+        CLASS R / LUC 550, blank situs). These are a DISTINCT identity space from the
+        7-digit deal parcels; keep the trailing 'S'.
+
+    This is DELIBERATELY market-dispatched, NOT a branch in normalize_parcel_number():
+    a bare '1210314' is form-identical to a Summit parcel, so the global format-detector
+    cannot disambiguate Lucas from Summit by string (F-008). normalize_parcel_for_market()
+    routes here only when market == 'lucas'.
+
+    NOTE (F-009 self-join risk): the exact canonical byte form of the '…S' condo parcels
+    must be confirmed against a real '…S' parcel traced across sources (spine vs any
+    listing/tape form) before this is relied on for go-live. Current rule preserves the
+    8-digit base + 'S'; revisit if a source emits these in a truncated/alternate form.
+    """
+    if raw is None:
+        return None
+    stripped = raw.strip().upper()
+    if not stripped:
+        return None
+
+    # ── 96 condo/split PARIDs: 8-digit base + trailing 'S'. Strip any separators
+    #    among the digits, keep the 'S' qualifier. '043-49-092S' → '04349092S'.
+    if stripped.endswith("S"):
+        digits = re.sub(r"\D", "", stripped[:-1])
+        return f"{digits}S" if digits else stripped
+
+    digits_only = re.sub(r"\D", "", stripped)
+
+    # ── Standard deal PARID: <= 7 digits → 7-digit zero-padded. '12-10314' → '1210314'.
+    if 1 <= len(digits_only) <= 7:
+        return digits_only.zfill(7)
+
+    # ── 8+ pure digits with no 'S' qualifier: unexpected for a Lucas deal parcel
+    #    (8-digit ASSESSOR_NUM is the GIS-internal id, NOT the deal key). Return the
+    #    digits unchanged — do NOT mis-route to another market's dashed/PAID format.
+    return digits_only if digits_only else stripped
+
+
+def normalize_parcel_for_market(raw: str | None, market: str) -> str | None:
+    """Market-aware parcel normalization (Phase 2 / F-008 dispatch).
+
+    Looks up the market's `parcel_normalize_fn` and applies it. The 4 pre-Lucas markets
+    (cuyahoga/shelby/summit/wayne) set `parcel_normalize_fn = normalize_parcel_number`
+    (the global format-detector), so their output is BYTE-FOR-BYTE unchanged. Lucas sets
+    `normalize_parcel_lucas`. Any unknown/missing market falls back to the global fn.
+
+    A bare '1210314' is genuinely ambiguous between Lucas and Summit; only the known
+    `market` resolves it — which is also why parcels identity is (parcel_number, market).
+    """
+    from app.market_config import MARKETS  # lazy import: market_config -> db, avoid load cycle
+
+    cfg = MARKETS.get(market)
+    fn = (cfg.get("parcel_normalize_fn") if cfg else None) or normalize_parcel_number
+    return fn(raw)
+
+
 def _utcnow() -> datetime:
     return datetime.now(tz=timezone.utc)
 
@@ -537,7 +600,9 @@ async def _upsert_one(
     norm_addr = normalize_address(canon_addr) if canon_addr else None
     canon_county = canonical_county(listing.property_county)
     canon_city = canonical_city(listing.property_city)
-    norm_parcel = normalize_parcel_number(listing.source_listing_id)
+    # Market-aware: routes Lucas PARIDs through normalize_parcel_lucas while keeping the
+    # 4 live markets on the global normalizer (their parcel_normalize_fn IS that fn).
+    norm_parcel = normalize_parcel_for_market(listing.source_listing_id, market)
 
     existing_id: UUID | None = None
 

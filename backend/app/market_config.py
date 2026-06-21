@@ -37,6 +37,13 @@ from __future__ import annotations
 
 import urllib.parse
 
+# Parcel normalizers live in db.py (the single home of canonical parcel form). market_config
+# imports db (one-directional: db never imports market_config at load time), so each market
+# can carry its `parcel_normalize_fn`. The 4 pre-Lucas markets use the global format-detector;
+# Lucas dispatches to normalize_parcel_lucas because a bare 7-digit PARID is form-identical to
+# a Summit parcel and cannot be disambiguated by string (F-008).
+from app.scrapers.db import normalize_parcel_lucas, normalize_parcel_number
+
 
 # GENERAL verification guidance shown once at the top of every HTML report.
 # Applies to all markets — explains the off-market and vacant-land norms that
@@ -217,6 +224,7 @@ def _make_cuyahoga_market() -> dict:
     return {
         "db": "tranchi",
         "state": "OH",
+        "parcel_normalize_fn": normalize_parcel_number,  # global format-detector (unchanged)
         "market_filter": "l.market = 'cuyahoga'",  # sample scope: by market, NOT state (two OH markets coexist)
         # Pre-distress lead surfacing (surface_distress.py). `distress_lead_county` is the
         # county label stamped on lead rows. `distress_lead_rules` (per signal_type):
@@ -466,6 +474,7 @@ def _make_shelby_market() -> dict:
     return {
         "db": "tranchi",
         "state": "TN",
+        "parcel_normalize_fn": normalize_parcel_number,  # global format-detector (unchanged)
         "market_filter": "l.market = 'shelby'",
         # Pre-distress lead surfacing (surface_distress.py). Shelby sources the lead address
         # from the parcel SPINE (situs_address; the signal payload location is street-only)
@@ -694,6 +703,7 @@ def _make_summit_market() -> dict:
     return {
         "db": "tranchi",
         "state": "OH",
+        "parcel_normalize_fn": normalize_parcel_number,  # global format-detector (unchanged)
         "market_filter": "l.market = 'summit'",
         # Pre-distress lead surfacing (surface_distress.py). Summit sources the lead ADDRESS
         # from the parcel SPINE (situs_address) — the SC720_DELQ tape's PROPERTY_ADDRESS is
@@ -944,6 +954,7 @@ def _make_wayne_market() -> dict:
     return {
         "db": "tranchi",
         "state": "MI",
+        "parcel_normalize_fn": normalize_parcel_number,  # global format-detector (unchanged)
         # Verify sample scope is by the county-level `market` column, not state (mirrors the
         # other markets since c557b57 — two same-state markets must not cross-contaminate).
         "market_filter": "l.market = 'wayne'",
@@ -1071,12 +1082,214 @@ def _make_wayne_market() -> dict:
     }
 
 
+def _make_lucas_market() -> dict:
+    """Lucas County (Toledo, OH) market config — the 5th market (G1-approved, S3 build).
+
+    OH framework carries over from Cuyahoga/Summit (judicial foreclosure via sheriff sale,
+    tax foreclosure, probate; sale FINAL at court confirmation — NO MI-style redemption →
+    KILL on sold/confirmed; tax parcels KILL on redeemed pre-sale). Canonical parcel = PARID
+    7-digit zero-padded — FORM-IDENTICAL to Summit, so parcel_normalize_fn is dispatched to
+    normalize_parcel_lucas (F-008) and identity is (parcel_number, 'lucas').
+
+    DIFFERENCE FROM SUMMIT (do NOT reuse Summit's discriminators): RealAuction weekday split is
+    WEDNESDAY -> mortgage_foreclosure (appraised; opening = 2/3 appraisal, R.C. 2329.52) and
+    THURSDAY -> tax_delinquent_foreclosure (non-appraised $0.00; opening = taxes+costs; 10%-of-bid
+    deposit, ORC 5721.19). Classify by weekday + per-item signature, NEVER by plaintiff.
+
+    AUTHORITY for the catalog cross-check = the AREIS spine OWNER (current owner of record), the
+    same role Summit GIS ownernme1 plays. RealAuction Wed/Thu rosters are pre-sale catalogs.
+
+    BUILD STATUS (engine-box session): registry (lucas_parcels / AREIS) is built + wired. The
+    deal/signal scrapers — lucas_realauction (Wed+Thu), lucas_legalnews (Toledo Legal News),
+    lucas_delinquent_tax (Column ~19k list, the 5k lever), lucas_probate (time-boxed) — are built
+    + validated on the engine box (anti-bot/IP-gated endpoints, unreachable off-box). As each is
+    validated, add it to MARKET_SCRAPERS['lucas'].deal_and_signal + run.py, and add its source_meta
+    / staleness_policies / distress_lead_types row here. The descriptive verification_guide and
+    deal_sources below are pre-written so verify/links work the moment data flows.
+    """
+
+    def registry_link(parcel: str | None, address: str | None,
+                      native_parcel_id: str | None = None) -> str:
+        # Lucas County Auditor AREIS property search (human-facing current-owner authority).
+        # The machine authority behind our stored owner is the AREIS MapServer L38 OWNER field.
+        return "https://areis.co.lucas.oh.us/"
+
+    def source_link(signal_type: str, parcel: str | None, case: str | None,
+                    sale_date, address: str | None,
+                    native_parcel_id: str | None = None) -> str:
+        sig = signal_type or ""
+        if sig in ("mortgage_foreclosure", "tax_delinquent_foreclosure"):
+            return "https://lucas.sheriffsaleauction.ohio.gov/   (Lucas Sheriff Sale — find by case/parcel/date)"
+        elif sig == "foreclosure_filing":
+            return "https://www.toledolegalnews.com/legal_notices/foreclosure_sherrif_sales_lucas/   (Toledo Legal News)"
+        elif sig == "probate":
+            return f"https://www.lucas-co-probate-ct.org/   (Lucas Probate — search estate case {case or '?'})"
+        elif sig == "tax_delinquent":
+            return "https://ohio.column.us/   (Auditor Delinquent Land Tax List — find by parcel)"
+        else:
+            return "https://areis.co.lucas.oh.us/"
+
+    def offmarket_links(address: str, city: str | None, zip_: str | None) -> tuple[str, str]:
+        return _zillow_url(address, city, "OH", zip_), _redfin_url(address, city, "OH", zip_)
+
+    verification_guide = {
+        "mortgage_foreclosure": {
+            "valid": (
+                "Row still on the Lucas Sheriff Sale (RealAuction, WEDNESDAYS) roster with matching "
+                "case# and a sale date >= today. Mortgage signature: appraised property, opening = 2/3 "
+                "of appraisal (R.C. 2329.52). The AREIS Auditor record confirms the owner of record and "
+                "shows no recent transfer."
+            ),
+            "red_flags": (
+                "Row dropped off the Wednesday roster (cancelled / redeemed / settled). Sale date past "
+                "(STALE). AREIS shows a new owner — already sold (OH sale is FINAL at confirmation)."
+            ),
+        },
+        "tax_delinquent_foreclosure": {
+            "valid": (
+                "Row on the Lucas Sheriff Sale (RealAuction, THURSDAYS) roster with the TAX signature "
+                "(Appraised $0.00 + opening = taxes+costs + 10%-of-bid deposit, ORC 5721.19). Sale date "
+                ">= today; AREIS confirms the parcel + owner. Classified by weekday+signature, not plaintiff."
+            ),
+            "red_flags": (
+                "Row dropped off the Thursday roster (redeemed before sale / cancelled). Sale date past "
+                "(STALE). AREIS shows a transfer to a new private owner (paid off / sold)."
+            ),
+        },
+        "probate": {
+            "valid": (
+                "Lucas Probate shows the estate case OPEN. The decedent (NOT the fiduciary) maps to a "
+                "Lucas residential parcel — real estate-in-probate where heirs may sell fast."
+            ),
+            "red_flags": (
+                "Case Closed (settled — dead lead). Decedent doesn't map to any real property. An AREIS "
+                "transfer at/after the case filing means the property already sold out of the estate."
+            ),
+        },
+        # Pre-Distress LEAD (surface_distress.py) — surfaced only after buy-now is verified.
+        "tax_delinquent": {
+            "valid": (
+                "On the Auditor Delinquent Land Tax List (Column ~19k) with a real certified balance on a "
+                "RESIDENTIAL parcel (LUC 5xx) and a PRIVATE-party owner. PRE-DISTRESS LEAD — owner under tax "
+                "pressure but NOT yet for sale through any channel. Off-market on Zillow/Redfin is consistent."
+            ),
+            "red_flags": (
+                "Balance cured / absent from the new list. Already on a RealAuction roster (that's a buy-now "
+                "deal, not a lead). AREIS shows a recent transfer to a new private owner (sold). Actively on MLS."
+            ),
+        },
+        "foreclosure_filing": {
+            "valid": (
+                "A foreclosure COMPLAINT/notice appears in Toledo Legal News (Common Pleas filing stage) — the "
+                "earliest distress stage, months before any sheriff sale. PRE-DISTRESS LEAD: owner in the "
+                "pipeline, property not yet at auction or for sale. AREIS confirms the parcel + a private owner."
+            ),
+            "red_flags": (
+                "The case already advanced to a scheduled sheriff sale on RealAuction (buy-now now, not a lead). "
+                "The complaint was dismissed/withdrawn. AREIS shows a transfer to a new private owner. On MLS."
+            ),
+        },
+    }
+
+    return {
+        "db": "tranchi",
+        "state": "OH",
+        # PARID is form-identical to Summit → market-dispatched normalizer (F-008), NOT the global
+        # format-detector. This is the load-bearing reason parcels identity is (parcel_number, market).
+        "parcel_normalize_fn": normalize_parcel_lucas,
+        "market_filter": "l.market = 'lucas'",
+        "distress_lead_county": "Lucas",
+        # Pre-distress levers. Lead address from the AREIS spine situs (the Column list / Legal News
+        # notices may carry partial situs). The delinquent gate enforces RULE #1: a real certified
+        # balance AND residential land-use (Lucas LUC 5xx). distress_lead_types rows ship DISABLED —
+        # enabled only after buy-now is verified (G1 discipline). Payload keys (delq_amount, luc)
+        # follow the Summit/Shelby convention — the lucas_delinquent_tax scraper emits them.
+        "distress_lead_rules": {
+            "tax_delinquent": {
+                "address_source": "spine",
+                "address_key": None,
+                "owner_key": "owner",
+                "gate_sql": (
+                    "((s.payload->>'delq_amount' ~ '^[0-9.]+$' "
+                    "  AND (s.payload->>'delq_amount')::numeric >= 2000) "
+                    " AND s.payload->>'luc' ~ '^5')"
+                ),
+            },
+            "foreclosure_filing": {
+                "address_source": "spine",
+                "address_key": None,
+                "owner_key": "owner",
+                "gate_sql": None,
+            },
+        },
+        "deal_sources": (
+            "mortgage_foreclosure",
+            "tax_delinquent_foreclosure",
+            "probate",
+            "tax_delinquent",      # Pre-Distress LEAD (Auditor Delinquent Land Tax List ~19k — the 5k lever)
+            "foreclosure_filing",  # Pre-Distress LEAD (Toledo Legal News Common Pleas filings)
+        ),
+        "source_sites": {
+            # RealAuction is ONE source_site emitting BOTH mortgage (Wed) + tax (Thu) signal_types.
+            "Lucas Sheriff Sale (RealAuction)": "mortgage_foreclosure",
+            "Toledo Legal News": "mortgage_foreclosure",
+            "Lucas Probate Court": "probate",
+            "Lucas Tax Delinquent (Lead)": "tax_delinquent",
+            "Lucas Foreclosure Filing (Lead)": "foreclosure_filing",
+        },
+        # Built sources only (registry). Add per-source policies as the deal/signal scrapers land.
+        "staleness_policies": {
+            "Lucas Sheriff Sale (RealAuction)": "full_rescan",
+            "Toledo Legal News": "full_rescan",
+        },
+        # Registry surfaced now; deal/signal source_meta added as each scraper is validated
+        # (so the live /sources dashboard does not list unbuilt 0-count sources).
+        "source_meta": {
+            "Lucas County Parcels (AREIS)": (
+                "https://lcaudgis.co.lucas.oh.us/gisaudserver/rest/services/AREIS_Web_Map_MIL1/MapServer/38",
+                "registry",
+            ),
+        },
+        # Lucas probate case format TBD (vendor unconfirmed — time-boxed recon). Filled when
+        # lucas_probate lands; None until then so the transfer guard is a no-op for Lucas.
+        "probate_transfer_rule": None,
+        # OH sale is FINAL at court confirmation — no statutory owner redemption window.
+        "redemption_windows": None,
+        "verifier_endpoints": {
+            "gis_query": (
+                "https://lcaudgis.co.lucas.oh.us/gisaudserver/rest/services/"
+                "AREIS_Web_Map_MIL1/MapServer/38/query"
+            ),
+            "realauction_base": "https://lucas.sheriffsaleauction.ohio.gov/",
+            "legalnews_base": "https://www.toledolegalnews.com/legal_notices/foreclosure_sherrif_sales_lucas/",
+            "delq_url": "https://ohio.column.us/",
+        },
+        "registry_link": registry_link,
+        "registry_label": "Lucas County Auditor — AREIS Property Search",
+        "registry_search_hint": (
+            "Opens the Lucas County Auditor AREIS search — type the 7-digit PARID (or the street "
+            "address) to pull the current-owner record. The AREIS MapServer L38 OWNER field is the "
+            "machine authority behind our stored owner."
+        ),
+        "registry_look_for": (
+            "(1) Owner name on the AREIS record should match our stored owner. "
+            "(2) Situs address should match our stored address. "
+            "(3) The most recent transfer/sale date — a transfer after we first listed means the "
+            "property already sold; the _mark_transferred_listings guard removes such listings."
+        ),
+        "source_link": source_link,
+        "offmarket_links": offmarket_links,
+        "verification_guide": verification_guide,
+    }
+
+
 # The market registry. To add a market: implement _make_<market>_market() and add it here.
 MARKETS: dict[str, dict] = {
     "cuyahoga": _make_cuyahoga_market(),
     "shelby": _make_shelby_market(),
     "summit": _make_summit_market(),
     "wayne": _make_wayne_market(),
+    "lucas": _make_lucas_market(),
 }
 
 
@@ -1134,6 +1347,16 @@ MARKET_SCRAPERS: dict[str, dict] = {
             "wayne_blight",          # Detroit blight tickets SIGNAL (pre-distress lever; DELTA on ticket_updated_at)
             "wayne_delinquent_tax",  # Wayne Treasurer forfeiture-PDF SIGNAL (pre-distress)
         ],
+    },
+    "lucas": {
+        # ~192K AREIS parcel sweep (L38 + L84 value join) too heavy for the 3h run → own weekly
+        # cron (--site lucas_parcels). deal_and_signal is filled on the engine box as each anti-bot
+        # source is validated + built: lucas_realauction (Wed mortgage + Thu tax), lucas_legalnews
+        # (Toledo Legal News), lucas_delinquent_tax (Column ~19k — the 5k lever), lucas_probate
+        # (time-boxed). Empty here so the engine never registers an unrunnable/unvalidated scraper.
+        "registry": "lucas_parcels",
+        "registry_in_full_run": False,
+        "deal_and_signal": [],
     },
 }
 

@@ -73,6 +73,7 @@ from app.scrapers.fiscal_officer import (  # noqa: E402
 )
 from app.scrapers.shelby_parcels import ShelbyParcelsScraper  # noqa: E402
 from app.scrapers.summit_parcels import SummitParcelsScraper  # noqa: E402
+from app.scrapers.lucas_parcels import LucasParcelsScraper  # noqa: E402
 from app.scrapers.wayne_parcels import WayneParcelsScraper  # noqa: E402
 from app.scrapers.wayne_foreclosure import WayneForeclosureScraper  # noqa: E402
 from app.scrapers.wayne_dlba import WayneDLBAScraper  # noqa: E402
@@ -117,6 +118,7 @@ _SCRAPERS: dict[str, type] = {
     "delinquent_tax": DelinquentTaxScraper,   # tax-distress SIGNAL (ArcGIS)
     "shelby_parcels": ShelbyParcelsScraper,   # Shelby County (TN) registry spine (ArcGIS)
     "summit_parcels": SummitParcelsScraper,   # Summit County (OH / Akron) registry spine (ArcGIS)
+    "lucas_parcels": LucasParcelsScraper,     # Lucas County (OH / Toledo) registry spine (AREIS ArcGIS)
     "wayne_parcels": WayneParcelsScraper,     # Wayne County (MI / Detroit) registry spine + Property-Sales overlay (ArcGIS)
     "wayne_foreclosure": WayneForeclosureScraper,  # Wayne (MI) mortgage foreclosure (mipublicnotices area=82 + auction.com), redemption lifecycle
     "wayne_dlba": WayneDLBAScraper,                # Detroit Land Bank (buildingdetroit + ArcGIS) — structures + buyable lots
@@ -233,6 +235,11 @@ async def _run_scraper(
         # overlay (509K ordered DESC) folded into the spine for the transferred-guard.
         # max_parcels=None = full sweep. For a test run: WayneParcelsScraper(max_parcels=500).
         scraper = scraper_cls()
+    elif scraper_key == "lucas_parcels":
+        # Full sweep of Lucas County (OH) AREIS at 2000/page (L38 parcels + L84 value join).
+        # ~192K parcels = ~96 pages. max_parcels=None = full sweep.
+        # For a test run: LucasParcelsScraper(max_parcels=500).
+        scraper = scraper_cls()
     elif scraper_key == "wayne_foreclosure":
         # Resolves notice/auction street addresses to Wayne parcels against tranchi.parcels
         # (market='wayne', house# + zip + street), so it needs the pool. Plain ListingScraper.
@@ -273,7 +280,7 @@ async def _run_scraper(
     try:
         logger.info("Starting scraper: %s", site_name)
 
-        if scraper_key in ("fiscal_officer", "shelby_parcels", "summit_parcels", "wayne_parcels"):
+        if scraper_key in ("fiscal_officer", "shelby_parcels", "summit_parcels", "wayne_parcels", "lucas_parcels"):
             # ── Registry path ──────────────────────────────────────────────────
             # Registry scrapers are parcel identity spines, not deal-listing feeds.
             # We populate tranchi.parcels only; tranchi.listings is never touched.
@@ -665,15 +672,16 @@ async def _ensure_parcels_for_listings(pool: asyncpg.Pool) -> int:
                 INSERT INTO tranchi.parcels
                     (parcel_number, situs_address, market, property_state,
                      first_seen_at, last_seen_at, source_url)
-                SELECT DISTINCT ON (l.source_listing_id)
+                SELECT DISTINCT ON (l.source_listing_id, l.market)
                        l.source_listing_id, l.property_address, l.market, l.property_state,
                        now(), now(), 'stub:listing'
                 FROM tranchi.listings l
-                LEFT JOIN tranchi.parcels p ON p.parcel_number = l.source_listing_id
+                LEFT JOIN tranchi.parcels p
+                       ON p.parcel_number = l.source_listing_id AND p.market = l.market
                 WHERE l.source_listing_id IS NOT NULL AND l.source_listing_id <> ''
                   AND l.status IN ('active', 'not_listed')
                   AND p.parcel_number IS NULL
-                ON CONFLICT (parcel_number) DO NOTHING
+                ON CONFLICT (parcel_number, market) DO NOTHING
                 """
             )
             count = int(result.split()[-1]) if result else 0

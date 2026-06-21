@@ -1004,9 +1004,14 @@ async def upsert_parcels(
     async with pool.acquire() as conn:
         for hit in hits:
             try:
+                # Market-scoped probe: under the composite PK (parcel_number, market)
+                # a Lucas PARID can equal a Summit parcel_number (8,529 collisions).
+                # Without `AND market = $2` this would find the OTHER market's row and
+                # route into the UPDATE branch, overwriting it with this market's data.
                 existing = await conn.fetchval(
-                    "SELECT parcel_number FROM tranchi.parcels WHERE parcel_number = $1",
+                    "SELECT parcel_number FROM tranchi.parcels WHERE parcel_number = $1 AND market = $2",
                     hit["parcel_number"],
+                    market,
                 )
                 # native_parcel_id: Shelby County spaced PARCELID for Trustee URL.
                 # Present only on shelby_parcels hits; Cuyahoga hits won't have it → NULL.
@@ -1035,7 +1040,7 @@ async def upsert_parcels(
                             -- whose registry hit passes NULL keep the value enrich_sales*.py set.
                             last_sale_date       = COALESCE($16, last_sale_date),
                             last_sale_price      = COALESCE($17, last_sale_price)
-                        WHERE parcel_number = $1
+                        WHERE parcel_number = $1 AND market = $14
                         """,
                         hit["parcel_number"],
                         hit.get("owner_name") or None,
@@ -1076,7 +1081,7 @@ async def upsert_parcels(
                             $13, $14, $15,
                             $16, $17
                         )
-                        ON CONFLICT (parcel_number) DO NOTHING
+                        ON CONFLICT (parcel_number, market) DO NOTHING
                         """,
                         hit["parcel_number"],
                         hit.get("owner_name") or None,

@@ -396,7 +396,7 @@ async def upsert_signals(
                     """
                     INSERT INTO tranchi.parcels (parcel_number, market, property_state)
                     VALUES ($1, $2, $3)
-                    ON CONFLICT (parcel_number) DO NOTHING
+                    ON CONFLICT (parcel_number, market) DO NOTHING
                     """,
                     parcel_number,
                     market,
