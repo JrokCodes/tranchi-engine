@@ -95,6 +95,15 @@ def _lead_fragments(market: str, signal_type: str) -> dict | None:
         "addr": addr, "city": city, "zip": zip_, "owner": owner,
         "addr_notnull": addr_notnull, "state": state, "county": county,
         "market": market, "gate": rule.get("gate_sql") or "TRUE",
+        # Per-type signal-freshness window. DELTA-pull signal sources (Detroit blight
+        # tickets) only bump last_seen_at on the handful of tickets that CHANGED each run,
+        # so the bulk of signals age past the default 4-day _FRESH window between full
+        # re-pulls — that silently retired 43.7k valid blight leads on 2026-06-21 (same
+        # class as the May-2026 probate cursor disaster). A wide window decouples lead
+        # liveness from delta recency; resolved tickets are still retired by the gate
+        # (balance→0 / disposition flips on the next delta touch). FULL_RESCAN signal
+        # sources keep the tight default. Override via distress_lead_rules.freshness_sql.
+        "fresh": rule.get("freshness_sql") or _FRESH,
     }
 
 
@@ -150,6 +159,7 @@ async def surface_distress_leads(pool: asyncpg.Pool, *, dry_run: bool = False) -
                                ss, mkt, st)
                 continue
             gate = f["gate"]
+            fresh = f["fresh"]  # per-type signal-freshness window (see _lead_fragments)
 
             # 1) Retire leads whose backing signal went stale OR no longer passes the gate
             #    (e.g. a code violation closed, a balance dropped below threshold), or whose
@@ -161,7 +171,7 @@ async def surface_distress_leads(pool: asyncpg.Pool, *, dry_run: bool = False) -
                     NOT EXISTS (SELECT 1 FROM tranchi.signals s
                        WHERE s.parcel_number=l.source_listing_id
                          AND s.source=$2 AND s.signal_type=$3
-                         AND s.last_seen_at >= {_FRESH}
+                         AND s.last_seen_at >= {fresh}
                          AND ({gate}))
                     OR EXISTS (SELECT 1 FROM tranchi.listings bl
                        WHERE bl.source_listing_id=l.source_listing_id
@@ -190,7 +200,7 @@ async def surface_distress_leads(pool: asyncpg.Pool, *, dry_run: bool = False) -
                 LEFT JOIN tranchi.parcels p
                   ON p.parcel_number = s.parcel_number AND p.market = s.market
                 WHERE s.source=$2 AND s.signal_type=$3
-                  AND s.last_seen_at >= {_FRESH}
+                  AND s.last_seen_at >= {fresh}
                   AND {f['addr_notnull']}
                   AND ({gate})
                   AND {_SOLD_GUARD}
@@ -207,7 +217,7 @@ async def surface_distress_leads(pool: asyncpg.Pool, *, dry_run: bool = False) -
                   AND EXISTS (SELECT 1 FROM tranchi.signals s
                        WHERE s.parcel_number=l.source_listing_id
                          AND s.source=$2 AND s.signal_type=$3
-                         AND s.last_seen_at >= {_FRESH}
+                         AND s.last_seen_at >= {fresh}
                          AND ({gate}))
             """
 
@@ -219,7 +229,7 @@ async def surface_distress_leads(pool: asyncpg.Pool, *, dry_run: bool = False) -
                         LEFT JOIN tranchi.parcels p
                           ON p.parcel_number=s.parcel_number AND p.market = s.market
                         WHERE s.source=$2 AND s.signal_type=$3
-                          AND s.last_seen_at >= {_FRESH}
+                          AND s.last_seen_at >= {fresh}
                           AND {f['addr_notnull']}
                           AND ({gate})
                           AND {_SOLD_GUARD}
@@ -248,7 +258,7 @@ async def surface_distress_leads(pool: asyncpg.Pool, *, dry_run: bool = False) -
             # active lingers, surfacing the outage that active-only counts would hide.
             fresh_signals = int(await conn.fetchval(
                 f"SELECT count(DISTINCT parcel_number) FROM tranchi.signals "
-                f"WHERE source=$1 AND signal_type=$2 AND last_seen_at >= {_FRESH}", src, st) or 0)
+                f"WHERE source=$1 AND signal_type=$2 AND last_seen_at >= {fresh}", src, st) or 0)
             await _record_run(conn, ss, found=fresh_signals, active=active, new_today=inserted)
             stats[ss] = {"enabled": True, "market": mkt, "inserted": inserted, "retired": retired,
                          "active_total": active}

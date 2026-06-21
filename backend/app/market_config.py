@@ -968,6 +968,15 @@ def _make_wayne_market() -> dict:
             # never a bare p.* reference, or those statements throw. Regex-guard the numeric cast.
             "blight_violation": {
                 "address_source": "spine", "address_key": None, "owner_key": "owner",
+                # DELTA-pull source: wayne_blight scrapes incrementally on ticket_updated_at,
+                # so only changed tickets get last_seen_at bumped each run; the bulk stay at
+                # the last FULL re-pull's timestamp. The default 4-day _FRESH window therefore
+                # aged out all ~43.8k leads ~4 days after the last full pull (the 2026-06-21
+                # collapse: 43,718 → 6). Widen to 21 days so leads survive between the weekly
+                # `wayne_blight --full` re-pull cron (heavy ~200k-row pull) without ever going
+                # dark; resolved/paid tickets are still retired by gate_sql on the next delta
+                # touch. See surface_distress.py `_lead_fragments` "fresh".
+                "freshness_sql": "now() - interval '21 days'",
                 "gate_sql": (
                     "(s.payload->>'disposition' ILIKE 'Responsible%' "
                     " AND s.payload->>'collection_status' = 'In Collections' "
