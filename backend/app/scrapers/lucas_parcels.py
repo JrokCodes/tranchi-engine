@@ -59,17 +59,21 @@ _VALUE_LAYER = f"{_MAPSERVER}/84"    # APRLAND / APRBLDG / APRTOT, keyed by PARI
 
 _PAGE_SIZE = 2000
 
-# L38 fields (recon-documented; confirm live on the engine box via the dry-run).
+# L38 fields (live-probed 2026-06-21 on the engine box; the L38 schema actually has
+# AREA_NUM/BLOCK_NUM/LOT_NUM as components of ASSESSOR_NUM, plus JUR/ZONING/TAXYR/etc.
+# We only request the fields the registry shape needs).
+# IMPORTANT: PROPERTY_ADDRESS is the FULL situs ("3941 VERMAAS AVE, TOLEDO OH 43612"),
+# not just the street — do NOT append TAXDIST, which is a 2-digit district code
+# (01/12/33), not a city name.
 _PARCEL_FIELDS = ",".join([
-    "PARID",              # 7-digit canonical deal parcel
+    "PARID",              # 7-digit canonical deal parcel (8-digit + 'S' for the 96 condos)
     "ASSESSOR_NUM",       # GIS-internal crosswalk id (NOT the join key)
     "OWNER",              # owner of record
-    "PROPERTY_ADDRESS",   # situs street address
+    "PROPERTY_ADDRESS",   # FULL situs: "STREET, CITY STATE ZIP" (already comma-joined)
     "MAILING_ADDRESS",    # owner mailing address
     "LUC",                # land use code (5xx = residential)
-    "CLASS",              # property class (R/C/O)
+    "CLASS",              # property class (R/C/E/I)
     "LEGAL_DESCRIPTION",
-    "TAXDIST",            # taxing district ~= city
 ])
 
 # L84 value fields, joined to the parcel layer by PARID.
@@ -95,15 +99,26 @@ def _safe_float(v: Any) -> float | None:
         return None
 
 
+_ZIP_TAIL_RE = re.compile(r"\b(\d{5})(?:-\d{4})?\b\s*$")
+
+
 def _build_situs(attrs: dict[str, Any]) -> str | None:
-    street = _clean(attrs.get("PROPERTY_ADDRESS"))
-    if not street:
+    """L38 PROPERTY_ADDRESS is the full situs ('3941 VERMAAS AVE, TOLEDO OH 43612').
+    Title-case it. Empty/bare-comma rows (the 96 '…S' condo bases) return None."""
+    raw = _clean(attrs.get("PROPERTY_ADDRESS"))
+    # The condo rows literally return ', ' (street + city both blank).
+    if not raw or raw.replace(",", "").strip() == "":
         return None
-    street = street.title()
-    city = _clean(attrs.get("TAXDIST")).title()
-    if city and city.lower() not in street.lower():
-        return f"{street}, {city}, OH"
-    return f"{street}, OH"
+    return raw.title()
+
+
+def _extract_zip(attrs: dict[str, Any]) -> str | None:
+    """ZIP is the trailing 5-digit token on PROPERTY_ADDRESS. None if absent."""
+    raw = _clean(attrs.get("PROPERTY_ADDRESS"))
+    if not raw:
+        return None
+    m = _ZIP_TAIL_RE.search(raw)
+    return m.group(1) if m else None
 
 
 def _attrs_to_parcel(attrs: dict[str, Any], values: dict[str, dict]) -> dict[str, Any] | None:
@@ -139,8 +154,8 @@ def _attrs_to_parcel(attrs: dict[str, Any], values: dict[str, dict]) -> dict[str
         "land_use_description": None,
         "neighborhood_code": None,
         "ward": None,
-        # No situs ZIP on this layer — listing sources carry it.
-        "property_zip": None,
+        # ZIP is the trailing token of PROPERTY_ADDRESS on L38 — extract it.
+        "property_zip": _extract_zip(attrs),
         "current_market_value": market_value,
         "source_url": f"{_PARCEL_LAYER}/query",
         "scraped_at": datetime.now(tz=timezone.utc).isoformat(),

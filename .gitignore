@@ -44,3 +44,6 @@ htmlcov/
 *.pem
 *.key
 secrets/
+
+# Claude Code harness state (per-checkout, not source)
+.claude/

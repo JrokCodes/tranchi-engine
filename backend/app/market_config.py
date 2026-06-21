@@ -1241,6 +1241,7 @@ def _make_lucas_market() -> dict:
         "staleness_policies": {
             "Lucas Sheriff Sale (RealAuction)": "full_rescan",
             "Toledo Legal News": "full_rescan",
+            "Lucas Tax Delinquent (Lead)": "full_rescan",
         },
         # Registry surfaced now; deal/signal source_meta added as each scraper is validated
         # (so the live /sources dashboard does not list unbuilt 0-count sources).
@@ -1248,6 +1249,18 @@ def _make_lucas_market() -> dict:
             "Lucas County Parcels (AREIS)": (
                 "https://lcaudgis.co.lucas.oh.us/gisaudserver/rest/services/AREIS_Web_Map_MIL1/MapServer/38",
                 "registry",
+            ),
+            "Lucas Sheriff Sale (RealAuction)": (
+                "https://lucas.sheriffsaleauction.ohio.gov/",
+                "deal",
+            ),
+            "Toledo Legal News": (
+                "https://www.toledolegalnews.com/legal_notices/foreclosure_sherrif_sales_lucas/",
+                "deal",
+            ),
+            "Lucas Tax Delinquent (Lead)": (
+                "https://www.toledolegalnews.com/legal_notices/foreclosures/",
+                "signal",
             ),
         },
         # Lucas probate case format TBD (vendor unconfirmed — time-boxed recon). Filled when
@@ -1356,7 +1369,11 @@ MARKET_SCRAPERS: dict[str, dict] = {
         # (time-boxed). Empty here so the engine never registers an unrunnable/unvalidated scraper.
         "registry": "lucas_parcels",
         "registry_in_full_run": False,
-        "deal_and_signal": [],
+        "deal_and_signal": [
+            "lucas_realauction",     # Lucas (OH) sheriff sale — mortgage (Wed) + tax (Thu), 2 signal_types
+            "lucas_legalnews",       # Lucas (OH) Toledo Legal News — sale cross-check + foreclosure-FILING lead
+            "lucas_delinquent_tax",  # Lucas (OH) tax-delinquent SIGNAL — TLN TFN articles (Column 19K deferred to G3)
+        ],
     },
 }
 

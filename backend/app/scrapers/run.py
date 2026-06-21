@@ -81,6 +81,9 @@ from app.scrapers.wayne_wclb import WayneCountyLandBankScraper  # noqa: E402
 from app.scrapers.wayne_tax_auction import WayneTaxAuctionScraper  # noqa: E402
 from app.scrapers.wayne_blight import WayneBlightScraper  # noqa: E402
 from app.scrapers.wayne_delinquent_tax import WayneDelinquentTaxScraper  # noqa: E402
+from app.scrapers.lucas_delinquent_tax import LucasDelinquentTaxScraper  # noqa: E402
+from app.scrapers.lucas_legalnews import LucasLegalNewsScraper  # noqa: E402
+from app.scrapers.lucas_realauction import LucasRealAuctionScraper  # noqa: E402
 from app.scrapers.summit_realauction import SummitRealAuctionScraper  # noqa: E402
 from app.scrapers.summit_legalnews import SummitLegalNewsScraper  # noqa: E402
 from app.scrapers.summit_probate import SummitProbateScraper  # noqa: E402
@@ -139,6 +142,9 @@ _SCRAPERS: dict[str, type] = {
     "summit_landbank": SummitLandBankScraper,          # Summit (OH) County Land Bank (Tolemi GraphQL)
     "summit_delinquent_tax": SummitDelinquentTaxScraper,  # Summit (OH) certified-delinquent tax SIGNAL (pre-distress)
     "summit_foreclosure_filings": SummitForeclosureFilingsScraper,  # Summit (OH) foreclosure-FILING SIGNAL (pre-distress, ALN)
+    "lucas_realauction": LucasRealAuctionScraper,      # Lucas (OH) sheriff sale — mortgage (Wed) + tax (Thu), 2 signal_types
+    "lucas_legalnews": LucasLegalNewsScraper,          # Lucas (OH) Toledo Legal News sheriff-sale + foreclosure-FILING leads
+    "lucas_delinquent_tax": LucasDelinquentTaxScraper, # Lucas (OH) tax-delinquent SIGNAL (TLN Treasurer TFN articles; Column 19K deferred to G3)
 }
 
 
