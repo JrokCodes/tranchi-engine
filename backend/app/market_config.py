@@ -1260,7 +1260,11 @@ def _make_lucas_market() -> dict:
             ),
             "Lucas Tax Delinquent (Lead)": (
                 "https://www.toledolegalnews.com/legal_notices/foreclosures/",
-                "signal",
+                "lead",
+            ),
+            "Lucas Foreclosure Filing (Lead)": (
+                "https://www.toledolegalnews.com/legal_notices/foreclosures/",
+                "lead",
             ),
         },
         # Lucas probate case format TBD (vendor unconfirmed — time-boxed recon). Filled when
@@ -1373,6 +1377,7 @@ MARKET_SCRAPERS: dict[str, dict] = {
             "lucas_realauction",     # Lucas (OH) sheriff sale — mortgage (Wed) + tax (Thu), 2 signal_types
             "lucas_legalnews",       # Lucas (OH) Toledo Legal News — sale cross-check + foreclosure-FILING lead
             "lucas_delinquent_tax",  # Lucas (OH) tax-delinquent SIGNAL — TLN TFN articles (Column 19K deferred to G3)
+            "lucas_foreclosure_filings",  # Lucas (OH) foreclosure-FILING SIGNAL — TLN Common Pleas complaints (pre-distress)
         ],
     },
 }

@@ -292,7 +292,10 @@ class LucasLegalNewsScraper(ListingScraper):
         async with httpx.AsyncClient(
             headers=default_headers(), timeout=_TIMEOUT, follow_redirects=True,
         ) as client:
-            for index_url, source_kind in ((_SHERIFF_INDEX, "sheriff"), (_FILING_INDEX, "filing")):
+            # Foreclosure-complaint FILINGS moved to lucas_foreclosure_filings.py (signal
+            # path → pre-distress lead). This scraper now owns ONLY the sheriff-sale roster
+            # (buy_now listings); emitting filings here as buy_now would suppress their leads.
+            for index_url, source_kind in ((_SHERIFF_INDEX, "sheriff"),):
                 index_html = await _get_with_retry(client, index_url)
                 if not index_html:
                     logger.error("Toledo Legal News: index fetch failed for %s", index_url)
