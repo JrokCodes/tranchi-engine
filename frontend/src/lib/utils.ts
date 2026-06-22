@@ -82,6 +82,7 @@ export function sourceBadgeClass(site: string): string {
 export interface Market { label: string; county: string; }
 export const MARKETS: Market[] = [
   { label: 'Cuyahoga (OH)', county: 'Cuyahoga' },
+  { label: 'Lucas–Toledo (OH)', county: 'Lucas' },
   { label: 'Shelby–Memphis (TN)', county: 'Shelby' },
   { label: 'Summit–Akron (OH)', county: 'Summit' },
   { label: 'Wayne–Detroit (MI)', county: 'Wayne' },
@@ -89,16 +90,18 @@ export const MARKETS: Market[] = [
 
 // Scope a source_site to a market by name. Shelby/Memphis sources name the county
 // or city; Summit/Akron name Summit or Akron; Wayne/Detroit name Wayne or Detroit;
-// everything else is Cuyahoga. (Names stay disjoint — no Cuyahoga/Shelby/Summit source
-// contains 'Wayne'/'Detroit', and vice-versa.)
+// Lucas/Toledo name Lucas or Toledo; everything else is Cuyahoga. (Names stay disjoint
+// — no Cuyahoga/Shelby/Summit/Lucas source contains 'Wayne'/'Detroit', and vice-versa.)
 export function sourceInCounty(site: string, county: string): boolean {
   const isShelby = site.includes('Shelby') || site.includes('Memphis') || site.includes('MMLBA');
   const isSummit = site.includes('Summit') || site.includes('Akron');
   const isWayne = site.includes('Wayne') || site.includes('Detroit');
+  const isLucas = site.includes('Lucas') || site.includes('Toledo');
   if (county === 'Shelby') return isShelby;
   if (county === 'Summit') return isSummit;
   if (county === 'Wayne') return isWayne;
-  return !isShelby && !isSummit && !isWayne;  // Cuyahoga = none of the above
+  if (county === 'Lucas') return isLucas;
+  return !isShelby && !isSummit && !isWayne && !isLucas;  // Cuyahoga = none of the above
 }
 
 // External "verify" link per market. Shelby's universal verifier is the County Trustee
@@ -141,6 +144,16 @@ export function buildVerifyLink(
     return {
       label: 'Verify on Wayne County (pto)',
       href: 'https://pto.waynecounty.com/',
+    };
+  }
+  if (county === 'Lucas') {
+    // Lucas/Toledo current-owner + parcel authority is the Auditor's AREIS portal
+    // (search by parcel/address; no stable per-parcel deep-link param confirmed —
+    // opens the search page). Per-listing source links from the API cover source
+    // verification.
+    return {
+      label: 'Verify on Lucas County (AREIS)',
+      href: 'https://areis.co.lucas.oh.us/',
     };
   }
   return null;
