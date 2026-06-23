@@ -84,6 +84,7 @@ from app.scrapers.wayne_delinquent_tax import WayneDelinquentTaxScraper  # noqa:
 from app.scrapers.lucas_delinquent_tax import LucasDelinquentTaxScraper  # noqa: E402
 from app.scrapers.lucas_legalnews import LucasLegalNewsScraper  # noqa: E402
 from app.scrapers.lucas_foreclosure_filings import LucasForeclosureFilingsScraper  # noqa: E402
+from app.scrapers.lucas_probate import LucasProbateScraper  # noqa: E402
 from app.scrapers.lucas_realauction import LucasRealAuctionScraper  # noqa: E402
 from app.scrapers.summit_realauction import SummitRealAuctionScraper  # noqa: E402
 from app.scrapers.summit_legalnews import SummitLegalNewsScraper  # noqa: E402
@@ -147,6 +148,7 @@ _SCRAPERS: dict[str, type] = {
     "lucas_legalnews": LucasLegalNewsScraper,          # Lucas (OH) Toledo Legal News sheriff-sale + foreclosure-FILING leads
     "lucas_delinquent_tax": LucasDelinquentTaxScraper, # Lucas (OH) tax-delinquent SIGNAL (TLN Treasurer TFN articles; Column 19K deferred to G3)
     "lucas_foreclosure_filings": LucasForeclosureFilingsScraper,  # Lucas (OH) foreclosure-FILING SIGNAL (TLN Common Pleas complaints; pre-distress lead)
+    "lucas_probate": LucasProbateScraper,  # Lucas (OH) probate ESTATE SIGNAL (TLN daily filings; decedent-name -> AREIS owner join)
 }
 
 
@@ -280,7 +282,7 @@ async def _run_scraper(
         # address → Summit parcel against the spine (market='summit'), so it needs the pool.
         # Drives CourtView eServices (Wicket single-use tokens). Plain ListingScraper out.
         scraper = scraper_cls(pool=pool, dry_run=dry_run)
-    elif scraper_key == "lucas_foreclosure_filings":
+    elif scraper_key in ("lucas_foreclosure_filings", "lucas_probate"):
         # Resolves parcel-less TLN complaint addresses against the Lucas AREIS spine
         # (market='lucas', unique house#+street+zip), so it needs the pool. SignalScraper
         # → output flows through the signal path below.

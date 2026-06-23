@@ -1221,6 +1221,15 @@ def _make_lucas_market() -> dict:
                 "owner_key": "owner",
                 "gate_sql": None,
             },
+            "probate": {
+                # Deceased-owner ESTATE (TLN probate filings -> AREIS owner-name match).
+                # Spine situs address; gate_sql=None — every matched deceased-owner parcel
+                # surfaces (name-only join, badged match_confidence='probable').
+                "address_source": "spine",
+                "address_key": None,
+                "owner_key": None,
+                "gate_sql": None,
+            },
         },
         "deal_sources": (
             "mortgage_foreclosure",
@@ -1264,6 +1273,10 @@ def _make_lucas_market() -> dict:
             ),
             "Lucas Foreclosure Filing (Lead)": (
                 "https://www.toledolegalnews.com/legal_notices/foreclosures/",
+                "lead",
+            ),
+            "Lucas Probate Court": (
+                "https://www.toledolegalnews.com/courts/probate/",
                 "lead",
             ),
         },
@@ -1378,6 +1391,7 @@ MARKET_SCRAPERS: dict[str, dict] = {
             "lucas_legalnews",       # Lucas (OH) Toledo Legal News — sale cross-check + foreclosure-FILING lead
             "lucas_delinquent_tax",  # Lucas (OH) tax-delinquent SIGNAL — TLN TFN articles (Column 19K deferred to G3)
             "lucas_foreclosure_filings",  # Lucas (OH) foreclosure-FILING SIGNAL — TLN Common Pleas complaints (pre-distress)
+            "lucas_probate",              # Lucas (OH) probate ESTATE SIGNAL — TLN daily filings -> AREIS owner join (pre-distress)
         ],
     },
 }
