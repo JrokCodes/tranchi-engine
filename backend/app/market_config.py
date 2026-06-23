@@ -1295,6 +1295,10 @@ def _make_lucas_market() -> dict:
                 "https://lcaudgis.co.lucas.oh.us/gisaudserver/rest/services/Hosted/Vacant_Delinquent___100/FeatureServer/21",
                 "lead",
             ),
+            "Lucas Tax Delinquent (AREIS)": (
+                "https://auditor-lucascountyohio.hub.arcgis.com/datasets/areis-info",
+                "signal",
+            ),
         },
         # Lucas probate case format TBD (vendor unconfirmed — time-boxed recon). Filled when
         # lucas_probate lands; None until then so the transfer guard is a no-op for Lucas.
@@ -1409,6 +1413,7 @@ MARKET_SCRAPERS: dict[str, dict] = {
             "lucas_foreclosure_filings",  # Lucas (OH) foreclosure-FILING SIGNAL — TLN Common Pleas complaints (pre-distress)
             "lucas_probate",              # Lucas (OH) probate ESTATE SIGNAL — TLN daily filings -> AREIS owner join (pre-distress)
             "lucas_vacant_delinquent",    # Lucas (OH) vacant+tax-delinquent SIGNAL — Auditor GIS (pre-distress)
+            "lucas_areis_delinquent",     # Lucas (OH) FULL certified-delinquent roll — public AREIS COLLECTION (primary tax_delinquent)
         ],
     },
 }
