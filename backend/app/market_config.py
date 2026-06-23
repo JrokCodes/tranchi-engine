@@ -1249,6 +1249,7 @@ def _make_lucas_market() -> dict:
             "probate",
             "tax_delinquent",      # Pre-Distress LEAD (Auditor Delinquent Land Tax List ~19k — the 5k lever)
             "foreclosure_filing",  # Pre-Distress LEAD (Toledo Legal News Common Pleas filings)
+            "forfeited_land",       # Tax-deed BUY-NOW (Auditor Forfeited Land Sales GIS)
         ),
         "source_sites": {
             # RealAuction is ONE source_site emitting BOTH mortgage (Wed) + tax (Thu) signal_types.
@@ -1257,12 +1258,14 @@ def _make_lucas_market() -> dict:
             "Lucas Probate Court": "probate",
             "Lucas Tax Delinquent (Lead)": "tax_delinquent",
             "Lucas Foreclosure Filing (Lead)": "foreclosure_filing",
+            "Lucas Forfeited Land": "forfeited_land",
         },
         # Built sources only (registry). Add per-source policies as the deal/signal scrapers land.
         "staleness_policies": {
             "Lucas Sheriff Sale (RealAuction)": "full_rescan",
             "Toledo Legal News": "full_rescan",
             "Lucas Tax Delinquent (Lead)": "full_rescan",
+            "Lucas Forfeited Land": "full_rescan",
         },
         # Registry surfaced now; deal/signal source_meta added as each scraper is validated
         # (so the live /sources dashboard does not list unbuilt 0-count sources).
@@ -1298,6 +1301,10 @@ def _make_lucas_market() -> dict:
             "Lucas Tax Delinquent (AREIS)": (
                 "https://auditor-lucascountyohio.hub.arcgis.com/datasets/areis-info",
                 "signal",
+            ),
+            "Lucas Forfeited Land": (
+                "https://lcaudgis.co.lucas.oh.us/gisaudserver/rest/services/Hosted/Forfeited_Land_Sales/FeatureServer/3",
+                "deal",
             ),
         },
         # Lucas probate case format TBD (vendor unconfirmed — time-boxed recon). Filled when
@@ -1414,6 +1421,7 @@ MARKET_SCRAPERS: dict[str, dict] = {
             "lucas_probate",              # Lucas (OH) probate ESTATE SIGNAL — TLN daily filings -> AREIS owner join (pre-distress)
             "lucas_vacant_delinquent",    # Lucas (OH) vacant+tax-delinquent SIGNAL — Auditor GIS (pre-distress)
             "lucas_areis_delinquent",     # Lucas (OH) FULL certified-delinquent roll — public AREIS COLLECTION (primary tax_delinquent)
+            "lucas_forfeited_land",       # Lucas (OH) forfeited-land tax-deed BUY-NOW listings (Auditor GIS)
         ],
     },
 }
