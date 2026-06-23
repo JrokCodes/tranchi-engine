@@ -85,6 +85,7 @@ from app.scrapers.lucas_delinquent_tax import LucasDelinquentTaxScraper  # noqa:
 from app.scrapers.lucas_legalnews import LucasLegalNewsScraper  # noqa: E402
 from app.scrapers.lucas_foreclosure_filings import LucasForeclosureFilingsScraper  # noqa: E402
 from app.scrapers.lucas_probate import LucasProbateScraper  # noqa: E402
+from app.scrapers.lucas_vacant_delinquent import LucasVacantDelinquentScraper  # noqa: E402
 from app.scrapers.lucas_realauction import LucasRealAuctionScraper  # noqa: E402
 from app.scrapers.summit_realauction import SummitRealAuctionScraper  # noqa: E402
 from app.scrapers.summit_legalnews import SummitLegalNewsScraper  # noqa: E402
@@ -149,6 +150,7 @@ _SCRAPERS: dict[str, type] = {
     "lucas_delinquent_tax": LucasDelinquentTaxScraper, # Lucas (OH) tax-delinquent SIGNAL (TLN Treasurer TFN articles; Column 19K deferred to G3)
     "lucas_foreclosure_filings": LucasForeclosureFilingsScraper,  # Lucas (OH) foreclosure-FILING SIGNAL (TLN Common Pleas complaints; pre-distress lead)
     "lucas_probate": LucasProbateScraper,  # Lucas (OH) probate ESTATE SIGNAL (TLN daily filings; decedent-name -> AREIS owner join)
+    "lucas_vacant_delinquent": LucasVacantDelinquentScraper,  # Lucas (OH) vacant+tax-delinquent SIGNAL (Auditor GIS Vacant_Delinquent layer)
 }
 
 

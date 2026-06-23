@@ -1230,6 +1230,18 @@ def _make_lucas_market() -> dict:
                 "owner_key": None,
                 "gate_sql": None,
             },
+            "vacant_delinquent": {
+                # Vacant + certified-delinquent parcel (Auditor GIS). RULE #1 gate: real
+                # balance AND residential LUC 5xx. Spine situs address.
+                "address_source": "spine",
+                "address_key": None,
+                "owner_key": "owner",
+                "gate_sql": (
+                    "((s.payload->>'delq_amount' ~ '^[0-9.]+$' "
+                    "  AND (s.payload->>'delq_amount')::numeric >= 2000) "
+                    " AND s.payload->>'luc' ~ '^5')"
+                ),
+            },
         },
         "deal_sources": (
             "mortgage_foreclosure",
@@ -1277,6 +1289,10 @@ def _make_lucas_market() -> dict:
             ),
             "Lucas Probate Court": (
                 "https://www.toledolegalnews.com/courts/probate/",
+                "lead",
+            ),
+            "Lucas Vacant Delinquent (Lead)": (
+                "https://lcaudgis.co.lucas.oh.us/gisaudserver/rest/services/Hosted/Vacant_Delinquent___100/FeatureServer/21",
                 "lead",
             ),
         },
@@ -1392,6 +1408,7 @@ MARKET_SCRAPERS: dict[str, dict] = {
             "lucas_delinquent_tax",  # Lucas (OH) tax-delinquent SIGNAL — TLN TFN articles (Column 19K deferred to G3)
             "lucas_foreclosure_filings",  # Lucas (OH) foreclosure-FILING SIGNAL — TLN Common Pleas complaints (pre-distress)
             "lucas_probate",              # Lucas (OH) probate ESTATE SIGNAL — TLN daily filings -> AREIS owner join (pre-distress)
+            "lucas_vacant_delinquent",    # Lucas (OH) vacant+tax-delinquent SIGNAL — Auditor GIS (pre-distress)
         ],
     },
 }
