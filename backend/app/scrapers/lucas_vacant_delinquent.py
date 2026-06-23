@@ -45,7 +45,7 @@ from app.scrapers.models import RawSignal
 
 logger = logging.getLogger(__name__)
 
-SITE_NAME = "Lucas Vacant Delinquent (Lead)"   # == source_site in market_config
+SITE_NAME = "Lucas Vacant Delinquent (GIS)"   # signal scrape_runs identity (distinct from the lead)
 SIGNAL_SOURCE = "lucas_areis_vacant_delinquent"
 _MARKET = "lucas"
 

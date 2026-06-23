@@ -75,7 +75,7 @@ from app.scrapers.user_agents import default_headers
 
 logger = logging.getLogger(__name__)
 
-SITE_NAME = "Lucas Foreclosure Filing (Lead)"   # == source_site in market_config
+SITE_NAME = "Lucas Foreclosure Filings (TLN)"   # signal scrape_runs identity (distinct from the lead)
 SIGNAL_SOURCE = "lucas_tln_foreclosures"
 _MARKET = "lucas"
 

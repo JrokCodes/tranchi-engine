@@ -1270,7 +1270,6 @@ def _make_lucas_market() -> dict:
         "staleness_policies": {
             "Lucas Sheriff Sale (RealAuction)": "full_rescan",
             "Toledo Legal News": "full_rescan",
-            "Lucas Tax Delinquent (Lead)": "full_rescan",
             "Lucas Forfeited Land": "full_rescan",
             "Lucas Land Bank": "full_rescan",
         },

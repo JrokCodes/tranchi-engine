@@ -93,7 +93,7 @@ from app.scrapers.user_agents import default_headers
 
 logger = logging.getLogger(__name__)
 
-SITE_NAME = "Lucas Tax Delinquent (Lead)"
+SITE_NAME = "Lucas Delinquent Tax (TLN)"   # signal scrape_runs identity (distinct from the lead)
 SIGNAL_SOURCE = "lucas_tln_tfn"
 _MARKET = "lucas"
 
