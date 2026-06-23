@@ -1250,6 +1250,7 @@ def _make_lucas_market() -> dict:
             "tax_delinquent",      # Pre-Distress LEAD (Auditor Delinquent Land Tax List ~19k — the 5k lever)
             "foreclosure_filing",  # Pre-Distress LEAD (Toledo Legal News Common Pleas filings)
             "forfeited_land",       # Tax-deed BUY-NOW (Auditor Forfeited Land Sales GIS)
+            "land_bank_inventory",  # Land Bank owned inventory BUY-NOW (Auditor CAMA GIS)
         ),
         "source_sites": {
             # RealAuction is ONE source_site emitting BOTH mortgage (Wed) + tax (Thu) signal_types.
@@ -1259,6 +1260,7 @@ def _make_lucas_market() -> dict:
             "Lucas Tax Delinquent (Lead)": "tax_delinquent",
             "Lucas Foreclosure Filing (Lead)": "foreclosure_filing",
             "Lucas Forfeited Land": "forfeited_land",
+            "Lucas Land Bank": "land_bank_inventory",
         },
         # Built sources only (registry). Add per-source policies as the deal/signal scrapers land.
         "staleness_policies": {
@@ -1266,6 +1268,7 @@ def _make_lucas_market() -> dict:
             "Toledo Legal News": "full_rescan",
             "Lucas Tax Delinquent (Lead)": "full_rescan",
             "Lucas Forfeited Land": "full_rescan",
+            "Lucas Land Bank": "full_rescan",
         },
         # Registry surfaced now; deal/signal source_meta added as each scraper is validated
         # (so the live /sources dashboard does not list unbuilt 0-count sources).
@@ -1304,6 +1307,10 @@ def _make_lucas_market() -> dict:
             ),
             "Lucas Forfeited Land": (
                 "https://lcaudgis.co.lucas.oh.us/gisaudserver/rest/services/Hosted/Forfeited_Land_Sales/FeatureServer/3",
+                "deal",
+            ),
+            "Lucas Land Bank": (
+                "https://lucascountylandbank.org/properties",
                 "deal",
             ),
         },
@@ -1422,6 +1429,7 @@ MARKET_SCRAPERS: dict[str, dict] = {
             "lucas_vacant_delinquent",    # Lucas (OH) vacant+tax-delinquent SIGNAL — Auditor GIS (pre-distress)
             "lucas_areis_delinquent",     # Lucas (OH) FULL certified-delinquent roll — public AREIS COLLECTION (primary tax_delinquent)
             "lucas_forfeited_land",       # Lucas (OH) forfeited-land tax-deed BUY-NOW listings (Auditor GIS)
+            "lucas_landbank",             # Lucas (OH) Land Bank owned inventory BUY-NOW listings (Auditor CAMA GIS)
         ],
     },
 }
