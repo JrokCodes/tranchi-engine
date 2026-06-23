@@ -175,6 +175,7 @@ async def surface_distress_leads(pool: asyncpg.Pool, *, dry_run: bool = False) -
                          AND ({gate}))
                     OR EXISTS (SELECT 1 FROM tranchi.listings bl
                        WHERE bl.source_listing_id=l.source_listing_id
+                         AND bl.market=l.market
                          AND bl.status='active' AND bl.distress_stage='buy_now')
                   )
             """
@@ -206,6 +207,7 @@ async def surface_distress_leads(pool: asyncpg.Pool, *, dry_run: bool = False) -
                   AND {_SOLD_GUARD}
                   AND NOT EXISTS (SELECT 1 FROM tranchi.listings bl
                         WHERE bl.source_listing_id=s.parcel_number
+                          AND bl.market=s.market
                           AND bl.status='active' AND bl.distress_stage='buy_now')
                   AND NOT EXISTS (SELECT 1 FROM tranchi.listings el
                         WHERE el.source_site=$1 AND el.source_listing_id=s.parcel_number)
@@ -235,6 +237,7 @@ async def surface_distress_leads(pool: asyncpg.Pool, *, dry_run: bool = False) -
                           AND {_SOLD_GUARD}
                           AND NOT EXISTS (SELECT 1 FROM tranchi.listings bl
                                 WHERE bl.source_listing_id=s.parcel_number
+                                  AND bl.market=s.market
                                   AND bl.status='active' AND bl.distress_stage='buy_now')
                           AND NOT EXISTS (SELECT 1 FROM tranchi.listings el
                                 WHERE el.source_site=$1 AND el.source_listing_id=s.parcel_number)
