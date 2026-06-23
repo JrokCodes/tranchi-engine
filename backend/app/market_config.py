@@ -1214,6 +1214,9 @@ def _make_lucas_market() -> dict:
                     "  AND (s.payload->>'delq_amount')::numeric >= 2000) "
                     " AND s.payload->>'luc' ~ '^5')"
                 ),
+                # MONTHLY cadence (AREIS roll) — widen the signal-freshness window so the
+                # 3h surface_distress keeps these leads live between monthly pulls.
+                "freshness_sql": "now() - interval '45 days'",
             },
             "foreclosure_filing": {
                 "address_source": "spine",
@@ -1232,7 +1235,7 @@ def _make_lucas_market() -> dict:
             },
             "vacant_delinquent": {
                 # Vacant + certified-delinquent parcel (Auditor GIS). RULE #1 gate: real
-                # balance AND residential LUC 5xx. Spine situs address.
+                # balance AND residential LUC 5xx. Spine situs address. MONTHLY cadence.
                 "address_source": "spine",
                 "address_key": None,
                 "owner_key": "owner",
@@ -1241,6 +1244,7 @@ def _make_lucas_market() -> dict:
                     "  AND (s.payload->>'delq_amount')::numeric >= 2000) "
                     " AND s.payload->>'luc' ~ '^5')"
                 ),
+                "freshness_sql": "now() - interval '45 days'",
             },
         },
         "deal_sources": (
@@ -1466,16 +1470,26 @@ def merged_source_meta() -> dict[str, tuple[str | None, str]]:
     return out
 
 
+# Deal/signal sources on their OWN cron (NOT the every-3h run) — heavy or slow-moving.
+# Jayden's "three clocks": auctions 3h, spine weekly, delinquency monthly. Each gets a
+# dedicated cron; the 3h surface_distress keeps their leads live via a widened
+# distress_lead_rules freshness_sql window.
+SELF_SCHEDULED_SOURCES: set[str] = {
+    "lucas_areis_delinquent",     # full AREIS COLLECTION delinquent roll (99MB) — MONTHLY
+    "lucas_vacant_delinquent",    # Auditor vacant-delinquent GIS — MONTHLY
+}
+
+
 def full_run_skip_keys() -> set[str]:
     """Registry spines EXCLUDED from the every-3h full run (heavy weekly-cron sweeps).
 
     A new heavy-registry market opts out by setting `registry_in_full_run=False` in its
     MARKET_SCRAPERS entry — no edit to run.py. Today returns {'shelby_parcels'}.
     """
-    return {
+    return ({
         m["registry"] for m in MARKET_SCRAPERS.values()
         if not m.get("registry_in_full_run", True)
-    }
+    } | SELF_SCHEDULED_SOURCES)
 
 
 def state_for_market(market: str) -> str:
