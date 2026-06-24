@@ -10,6 +10,20 @@ A collapse = active fell >40% AND by >=50 listings vs the previous run. Conserva
 enough that routine sold/redeemed churn won't trip it; sensitive enough to catch a wipe.
 Thresholds are intentionally blunt — a false positive is a glance at a dashboard; a false
 negative is another silent 43k-lead loss.
+
+ZERO-YIELD tripwire (added 2026-06-24): detect_collapses only compares `active` between
+the two most recent SUCCESSFUL runs inside a 7-DAY window. It therefore CANNOT catch two
+real failure modes the Lucas audit surfaced:
+  (1) a scraper that hits a broken source and returns [] is logged status='success',
+      found=0 — a silent outage that looks identical to "nothing new"; and
+  (2) a MONTHLY signal source (e.g. lucas_areis_delinquent → 11,314 tax leads) whose prior
+      run is >7 days old, so it never enters the 7-day comparison at all. A failed monthly
+      pull would let its ~11k leads age out over the 45-day freshness window with NO single
+      run showing a >40% drop — the slow-motion version of the blight wipe.
+detect_zero_yield closes both: it fires when a source's MOST RECENT run yielded found=0
+while a successful run within the last 75 days had found >= _ZY_FLOOR. A short recency
+window on the latest run means a failed monthly source alerts once (on the run that just
+failed — that source's own --site cron invokes run.py, which calls this), not every cycle.
 """
 from __future__ import annotations
 
@@ -23,6 +37,15 @@ logger = logging.getLogger("collapse_guard")
 
 _DROP_PCT = 0.40
 _DROP_MIN = 50
+
+# Zero-yield tripwire knobs. _ZY_FLOOR: a prior run must have had at least this many `found`
+# for a drop-to-zero to be alarming (keeps tiny/intermittent sources from false-tripping).
+# _ZY_LOOKBACK_DAYS: how far back to look for that prior high (covers a monthly cadence).
+# _ZY_RECENT_HOURS: only alert when the failing run JUST happened (one alert per failure,
+# not one per 3h cycle for the whole month the source stays at zero).
+_ZY_FLOOR = 30
+_ZY_LOOKBACK_DAYS = 75
+_ZY_RECENT_HOURS = 4
 
 
 async def detect_collapses(conn: asyncpg.Connection) -> list[dict]:
@@ -48,22 +71,70 @@ async def detect_collapses(conn: asyncpg.Connection) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def detect_zero_yield(conn: asyncpg.Connection) -> list[dict]:
+    """Return sources whose most-recent (just-completed) run found 0 while a recent run had data.
+
+    Catches a silent source outage (broken HTML/GIS/maintenance → []) that the active-count
+    collapse check misses, including monthly sources outside its 7-day window. Only considers
+    the latest run when it is recent (_ZY_RECENT_HOURS) so the alert fires once, on the run
+    that failed, rather than every cycle for as long as the source stays at zero.
+    """
+    rows = await conn.fetch(
+        """
+        WITH latest AS (
+            SELECT DISTINCT ON (source_site)
+                   source_site, found, started_at
+            FROM tranchi.scrape_runs
+            ORDER BY source_site, started_at DESC
+        ),
+        recent_high AS (
+            SELECT source_site, max(found) AS prev_found
+            FROM tranchi.scrape_runs
+            WHERE status = 'success'
+              AND started_at > now() - ($2::int * interval '1 day')
+            GROUP BY source_site
+        )
+        SELECT l.source_site, h.prev_found
+        FROM latest l
+        JOIN recent_high h ON h.source_site = l.source_site
+        WHERE l.found = 0
+          AND l.started_at > now() - ($3::int * interval '1 hour')
+          AND h.prev_found >= $1
+        ORDER BY h.prev_found DESC
+        """,
+        _ZY_FLOOR, _ZY_LOOKBACK_DAYS, _ZY_RECENT_HOURS,
+    )
+    return [dict(r) for r in rows]
+
+
 async def check_and_alert_collapse(pool: asyncpg.Pool) -> int:
-    """Detect collapses and fire one Telegram alert listing them. Never raises."""
+    """Detect collapses + zero-yield outages and fire one Telegram alert. Never raises.
+
+    Returns the number of flagged sources (collapses + zero-yield) so the caller can log it.
+    """
     try:
         async with pool.acquire() as conn:
             collapses = await detect_collapses(conn)
+            zero_yield = await detect_zero_yield(conn)
     except Exception as exc:  # noqa: BLE001 — a tripwire must never crash the run
         logger.error("collapse_guard query failed (non-fatal): %s", exc)
         return 0
-    if not collapses:
+    if not collapses and not zero_yield:
         return 0
-    lines = ["\U0001f6a8 TRANCHI COLLAPSE TRIPWIRE — source active-count dropped sharply this run:", ""]
-    for c in collapses:
-        pct = 100 * (c["prev_active"] - c["curr_active"]) / c["prev_active"]
-        lines.append(f"• {c['source_site']}: {c['prev_active']:,} → {c['curr_active']:,}  (−{pct:.0f}%)")
-    lines += ["", "Investigate before this propagates downstream. (run.py collapse_guard)"]
+    lines: list[str] = ["\U0001f6a8 TRANCHI TRIPWIRE — investigate before this propagates:", ""]
+    if collapses:
+        lines.append("Active-count collapse (vs previous run):")
+        for c in collapses:
+            pct = 100 * (c["prev_active"] - c["curr_active"]) / c["prev_active"]
+            lines.append(f"• {c['source_site']}: {c['prev_active']:,} → {c['curr_active']:,}  (−{pct:.0f}%)")
+        lines.append("")
+    if zero_yield:
+        lines.append("Zero-yield (source returned 0 but recently had data — likely a silent outage):")
+        for z in zero_yield:
+            lines.append(f"• {z['source_site']}: found=0 this run (recent high was {z['prev_found']:,})")
+        lines.append("")
+    lines.append("(run.py collapse_guard)")
     msg = "\n".join(lines)
-    logger.warning("collapse tripwire fired: %d source(s)", len(collapses))
+    logger.warning("tripwire fired: %d collapse, %d zero-yield", len(collapses), len(zero_yield))
     send_telegram(msg)
-    return len(collapses)
+    return len(collapses) + len(zero_yield)

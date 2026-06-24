@@ -47,3 +47,7 @@ secrets/
 
 # Claude Code harness state (per-checkout, not source)
 .claude/
+
+# backup env / db dumps — never commit (secrets)
+.env.bak*
+*.bak-*

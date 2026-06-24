@@ -295,6 +295,11 @@ async def _run_scraper(
         # (market='lucas', unique house#+street+zip), so it needs the pool. SignalScraper
         # → output flows through the signal path below.
         scraper = scraper_cls(pool=pool, dry_run=dry_run)
+    elif scraper_key == "lucas_forfeited_land":
+        # ListingScraper, but gates the stale forfeited-land catalog against the live AREIS
+        # spine owner (keep only still-FORFEITED parcels), so it needs the pool. Output
+        # flows through the listing path below.
+        scraper = scraper_cls(pool=pool, dry_run=dry_run)
     else:
         scraper = scraper_cls()
     site_name = scraper.site_name
