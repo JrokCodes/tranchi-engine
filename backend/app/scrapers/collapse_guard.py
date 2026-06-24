@@ -21,9 +21,14 @@ real failure modes the Lucas audit surfaced:
       pull would let its ~11k leads age out over the 45-day freshness window with NO single
       run showing a >40% drop — the slow-motion version of the blight wipe.
 detect_zero_yield closes both: it fires when a source's MOST RECENT run yielded found=0
-while a successful run within the last 75 days had found >= _ZY_FLOOR. A short recency
-window on the latest run means a failed monthly source alerts once (on the run that just
-failed — that source's own --site cron invokes run.py, which calls this), not every cycle.
+while that source RELIABLY returns a full count every run. "Reliably" = the MEDIAN of its
+recent successful `found` is >= _ZY_FLOOR. The median is the load-bearing discriminator:
+delta-pull sources (code_violations, wayne_blight) and any source where found=0 is a normal
+outcome have a low/zero median, so they never trip; only true full-rescan / full-pull
+sources (AREIS roll, RealAuction roster, parcel spine, TLN sheriff roster) qualify, and for
+those a 0 genuinely means a silent outage. A short recency window (_ZY_RECENT_HOURS) on the
+latest run means a failed monthly source alerts once — on the run that just failed (that
+source's own --site cron invokes run.py, which calls this) — not every cycle for a month.
 """
 from __future__ import annotations
 
@@ -38,13 +43,16 @@ logger = logging.getLogger("collapse_guard")
 _DROP_PCT = 0.40
 _DROP_MIN = 50
 
-# Zero-yield tripwire knobs. _ZY_FLOOR: a prior run must have had at least this many `found`
-# for a drop-to-zero to be alarming (keeps tiny/intermittent sources from false-tripping).
-# _ZY_LOOKBACK_DAYS: how far back to look for that prior high (covers a monthly cadence).
+# Zero-yield tripwire knobs. _ZY_FLOOR: the source's MEDIAN recent `found` must be at least
+# this for a drop-to-zero to be alarming — this is what excludes delta/cursor sources whose
+# found=0 is a normal outcome (their median is ~0) while keeping full-pull sources.
+# _ZY_LOOKBACK_DAYS: window for the median + recency of the prior data (covers a monthly
+# cadence). _ZY_MIN_RUNS: need at least this many successful runs to trust the median.
 # _ZY_RECENT_HOURS: only alert when the failing run JUST happened (one alert per failure,
 # not one per 3h cycle for the whole month the source stays at zero).
 _ZY_FLOOR = 30
 _ZY_LOOKBACK_DAYS = 75
+_ZY_MIN_RUNS = 2
 _ZY_RECENT_HOURS = 4
 
 
@@ -87,22 +95,25 @@ async def detect_zero_yield(conn: asyncpg.Connection) -> list[dict]:
             FROM tranchi.scrape_runs
             ORDER BY source_site, started_at DESC
         ),
-        recent_high AS (
-            SELECT source_site, max(found) AS prev_found
+        stats AS (
+            SELECT source_site,
+                   percentile_cont(0.5) WITHIN GROUP (ORDER BY found) AS med_found,
+                   count(*) AS n
             FROM tranchi.scrape_runs
             WHERE status = 'success'
               AND started_at > now() - ($2::int * interval '1 day')
             GROUP BY source_site
         )
-        SELECT l.source_site, h.prev_found
+        SELECT l.source_site, s.med_found::bigint AS typical_found
         FROM latest l
-        JOIN recent_high h ON h.source_site = l.source_site
+        JOIN stats s ON s.source_site = l.source_site
         WHERE l.found = 0
-          AND l.started_at > now() - ($3::int * interval '1 hour')
-          AND h.prev_found >= $1
-        ORDER BY h.prev_found DESC
+          AND l.started_at > now() - ($4::int * interval '1 hour')
+          AND s.n >= $3
+          AND s.med_found >= $1
+        ORDER BY s.med_found DESC
         """,
-        _ZY_FLOOR, _ZY_LOOKBACK_DAYS, _ZY_RECENT_HOURS,
+        _ZY_FLOOR, _ZY_LOOKBACK_DAYS, _ZY_MIN_RUNS, _ZY_RECENT_HOURS,
     )
     return [dict(r) for r in rows]
 
@@ -129,9 +140,9 @@ async def check_and_alert_collapse(pool: asyncpg.Pool) -> int:
             lines.append(f"• {c['source_site']}: {c['prev_active']:,} → {c['curr_active']:,}  (−{pct:.0f}%)")
         lines.append("")
     if zero_yield:
-        lines.append("Zero-yield (source returned 0 but recently had data — likely a silent outage):")
+        lines.append("Zero-yield (source returned 0 but normally returns a full count — likely a silent outage):")
         for z in zero_yield:
-            lines.append(f"• {z['source_site']}: found=0 this run (recent high was {z['prev_found']:,})")
+            lines.append(f"• {z['source_site']}: found=0 this run (typically ~{z['typical_found']:,})")
         lines.append("")
     lines.append("(run.py collapse_guard)")
     msg = "\n".join(lines)
