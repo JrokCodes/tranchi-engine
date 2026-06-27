@@ -176,6 +176,15 @@ _SALE_DATE_ALT_RE = re.compile(
     r'(?:\s+on)?\s+([A-Za-z]+\s+\d{1,2},?\s+\d{4}|\d{1,2}/\d{1,2}/\d{4})',
     re.IGNORECASE,
 )
+# "Bidding Open Date: 7/15/2026" — Beth Rose Auction (bethroseauction.com) format.
+# Distinct auctioneer from Auction.com; the bidding-open date is the sale date (the
+# auction window opens then). ~60/76 of the otherwise-undated public_auctions notices
+# use this format (verified live 2026-06-27). Without it the sale_date is NULL, which
+# both hides the date from users AND defeats the sale_date-passed expiry guard.
+_SALE_DATE_BIDOPEN_RE = re.compile(
+    r'Bidding\s+Open\s+Date\s*:?\s*(\d{1,2}/\d{1,2}/\d{4}|[A-Za-z]+\s+\d{1,2},?\s+\d{4})',
+    re.IGNORECASE,
+)
 
 # Sale time
 _SALE_TIME_RE = re.compile(
@@ -193,8 +202,10 @@ _DEPOSIT_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Sale location (Montgomery uses Auction.com)
-_SALE_LOC_RE = re.compile(r'((?:www\.)?[Aa]uction\.com\S*)', re.IGNORECASE)
+# Sale location. Montgomery foreclosure auctions run on two platforms: Auction.com and
+# Beth Rose (bethroseauction.com). Capture the full host — a bare 'auction.com' pattern
+# wrongly truncates 'bethroseauction.com' to 'auction.com'.
+_SALE_LOC_RE = re.compile(r'((?:www\.)?[A-Za-z]*[Aa]uction\.com)', re.IGNORECASE)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -408,8 +419,9 @@ def _extract_sale_date(text: str) -> date | None:
     """Extract sale/auction date from DCR notice text.
 
     Priority: "Sale Date:" label → "opening on [DATE]" (Auction.com primary date)
-    → "Provisional Sale date:" → "sold at auction on [DATE]".
-    The Auction.com opening date is the primary bidding date for Montgomery auctions.
+    → "Bidding Open Date:" (Beth Rose / bethroseauction.com) → "Provisional Sale date:"
+    → "sold at auction on [DATE]". Auction.com and Beth Rose are the two Montgomery
+    auction platforms; each labels its bidding-open (sale) date differently.
     """
     m = _SALE_DATE_LABEL_RE.search(text)
     if m:
@@ -417,6 +429,9 @@ def _extract_sale_date(text: str) -> date | None:
     m2 = _SALE_DATE_OPENING_RE.search(text)
     if m2:
         return _parse_date_flexible(m2.group(1))
+    mbo = _SALE_DATE_BIDOPEN_RE.search(text)
+    if mbo:
+        return _parse_date_flexible(mbo.group(1))
     m3 = _SALE_DATE_PROV_RE.search(text)
     if m3:
         return _parse_date_flexible(m3.group(1))
