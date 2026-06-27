@@ -282,6 +282,25 @@ def normalize_parcel_number(raw: str | None) -> str | None:
       return; if you only have PAID for an alpha-MAP parcel, use the spaced
       PARCELID from ReGIS or the Alt_Parcel from the tax CSV instead.
 
+    MONTGOMERY COUNTY (OH / Dayton) — canonical form: uppercase collapsed alphanumeric
+      (letter + 11 OR 12 digits — 3- or 4-digit TAXBOOK), e.g. 'R72117030016'.
+      Three delimiter variants of the same PRINT_KEY all normalize to one form:
+        Spaced:        'R72 11703 0016'  → 'R72117030016'
+        Hyphenated:    'R72-16003-0038'  → 'R72160030038'
+        No-delimiter:  'R72119130016'    → 'R72119130016'  (idempotent)
+      Detection: strip all spaces/hyphens → exactly 1 leading letter + 11 pure digits
+      (no embedded letters). This is disjoint from every live market:
+        - Cuyahoga: 8 digits, no letters.
+        - Summit/Lucas: ≤7 digits, no letters.
+        - Shelby: spaced_m branch catches Shelby alpha-MAP forms (MAP ≥4 chars) first;
+          Montgomery MAP is only 3 chars ('R72') so it is never mis-caught by the
+          Shelby spaced branch (which requires MAP 4–7 chars).
+        - Wayne: 8 digits + trailing '.'/'-'/alpha — Wayne branch fires first.
+      Guard: Logan County parcels (numeric only, shared DCR feed) never start with a
+      letter and therefore never match this branch.
+      PLACEMENT: after the Shelby spaced_m block (branch 6) to ensure Shelby alpha-MAP
+      spaced forms are caught by branch 6 before reaching this check.
+
     WAYNE COUNTY (MI / Detroit) — canonical form: the source string VERBATIM.
       Detroit assessor parcels carry SIGNIFICANT trailing characters that must never
       be stripped or two distinct parcels collide ('01000001.' != '010000023'):
@@ -304,7 +323,8 @@ def normalize_parcel_number(raw: str | None) -> str | None:
       - Purely numeric after strip, 8 digits → Cuyahoga compact.
       - No letters + <= 7 digits after strip → Summit (zero-pad to 7).
       - Exactly 14 alphanumeric chars, no spaces → already canonical (idempotent).
-      - Contains internal whitespace (two non-space groups) → Shelby spaced form.
+      - Contains internal whitespace (two non-space groups, MAP 4–7 chars) → Shelby spaced.
+      - 1 leading letter + 11 pure digits (spaces/hyphens collapsed) → Montgomery/Dayton.
       - Purely numeric, 10–11 digits → Shelby PAID compact (numeric-MAP only).
       - Anything else → return uppercased as-is (don't crash on edge cases).
     """
@@ -371,6 +391,19 @@ def normalize_parcel_number(raw: str | None) -> str | None:
 
         grp_padded = grp_numeric.zfill(6)
         return f"{map_padded}0{grp_padded}{qualifier}"
+
+    # ── Montgomery County (OH / Dayton): letter-prefix PRINT_KEY ─────────────
+    # Collapse spaces/hyphens first, then test: exactly 1 leading letter followed
+    # by 11 OR 12 pure digits (no embedded letters). The TAXBOOK segment is usually
+    # 3 digits (→ 11 total, e.g. 'R72 11703 0016') but ~7% of live AUDGIS parcels
+    # have a 4-digit book (→ 12 total, e.g. 'R72410822 0018') — BOTH must collapse to
+    # the same canonical form or those parcels silently miss the spine join (the
+    # Shelby alpha-MAP left/right-pad lesson). Fires AFTER the Shelby spaced_m block so
+    # Shelby alpha-MAP spaced forms (MAP ≥4 chars) are caught above first. Logan County
+    # numeric parcels (shared DCR feed) start with a digit → no match.
+    _mont_collapsed = re.sub(r"[-\s]", "", stripped).upper()
+    if re.match(r"^[A-Za-z][0-9]{11,12}$", _mont_collapsed):
+        return _mont_collapsed
 
     # PAID compact: purely numeric, 10–11 digits (numeric MAP6 + GROUP4or5).
     # Alpha-MAP PAID forms (e.g. 'D021700225') are not purely numeric, so they

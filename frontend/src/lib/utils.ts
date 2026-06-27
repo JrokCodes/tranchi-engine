@@ -83,25 +83,28 @@ export interface Market { label: string; county: string; }
 export const MARKETS: Market[] = [
   { label: 'Cuyahoga (OH)', county: 'Cuyahoga' },
   { label: 'Lucas–Toledo (OH)', county: 'Lucas' },
+  { label: 'Montgomery–Dayton (OH)', county: 'Montgomery' },
   { label: 'Shelby–Memphis (TN)', county: 'Shelby' },
   { label: 'Summit–Akron (OH)', county: 'Summit' },
   { label: 'Wayne–Detroit (MI)', county: 'Wayne' },
 ];
 
-// Scope a source_site to a market by name. Shelby/Memphis sources name the county
-// or city; Summit/Akron name Summit or Akron; Wayne/Detroit name Wayne or Detroit;
-// Lucas/Toledo name Lucas or Toledo; everything else is Cuyahoga. (Names stay disjoint
-// — no Cuyahoga/Shelby/Summit/Lucas source contains 'Wayne'/'Detroit', and vice-versa.)
+// Scope a source_site to a market by name. Montgomery/Dayton sources name the county;
+// Shelby/Memphis sources name the county or city; Summit/Akron name Summit or Akron;
+// Wayne/Detroit name Wayne or Detroit; Lucas/Toledo name Lucas or Toledo; everything
+// else is Cuyahoga. (Names stay disjoint across markets.)
 export function sourceInCounty(site: string, county: string): boolean {
+  const isMontgomery = site.includes('Montgomery');
   const isShelby = site.includes('Shelby') || site.includes('Memphis') || site.includes('MMLBA');
   const isSummit = site.includes('Summit') || site.includes('Akron');
   const isWayne = site.includes('Wayne') || site.includes('Detroit');
   const isLucas = site.includes('Lucas') || site.includes('Toledo');
+  if (county === 'Montgomery') return isMontgomery;
   if (county === 'Shelby') return isShelby;
   if (county === 'Summit') return isSummit;
   if (county === 'Wayne') return isWayne;
   if (county === 'Lucas') return isLucas;
-  return !isShelby && !isSummit && !isWayne && !isLucas;  // Cuyahoga = none of the above
+  return !isMontgomery && !isShelby && !isSummit && !isWayne && !isLucas;  // Cuyahoga = none of the above
 }
 
 // External "verify" link per market. Shelby's universal verifier is the County Trustee
@@ -113,6 +116,16 @@ export function buildVerifyLink(
   nativeParcelId: string | null,
   address: string | null,
 ): { label: string; href: string } | null {
+  if (county === 'Montgomery') {
+    // Montgomery County (OH / Dayton) current-owner + parcel authority is the
+    // Auditor's AUDGIS/MyPlace portal. No stable per-parcel deep-link param confirmed
+    // for the public-facing search — falls through to the search root. Per-listing
+    // source links from the API cover DCR/RealForeclose/Probate source verification.
+    return {
+      label: 'Verify on Montgomery County Auditor',
+      href: 'https://www.mcohio.org/government/departments/auditor/property_information/',
+    };
+  }
   if (county === 'Shelby') {
     if (nativeParcelId) {
       return {

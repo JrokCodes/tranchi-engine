@@ -1350,6 +1350,299 @@ def _make_lucas_market() -> dict:
     }
 
 
+def _make_dayton_market() -> dict:
+    """Dayton / Montgomery County (OH) market config — 6-source build (G2-FOUNDATION wave).
+
+    OH framework carries over from Cuyahoga/Summit (judicial foreclosure via sheriff sale,
+    tax foreclosure, probate; sale FINAL at court confirmation — no MI-style redemption →
+    redemption_windows=None). Canonical parcel = PRINT_KEY [LETTER][2d] [5d] [4d]
+    (e.g. 'R72 11703 0016'). The single leading letter + 11-digit suffix is auto-detectable
+    in normalize_parcel_number() — no collision with any live market (Cuyahoga DDD-NN-NNN,
+    Summit 7-digit, Shelby 14-char, Wayne 8-digit+trailing, Lucas 7-digit). Unlike Lucas,
+    Dayton's format is unambiguous → parcel_normalize_fn is the global format-detector.
+
+    TRAP (DCR multi-county feed): Logan County parcels are purely numeric — the letter-prefix
+    guard in normalize_parcel_number() keeps them out of the Montgomery canonical branch.
+    Filter by letter-prefix inside dayton_legalnews.py scraper (never here).
+
+    Deal bar clears at 6 deal types (BLUEPRINT §0):
+      938 DCR auctions + ~1,300 probate/yr + ~20.1k NETDELQ + ~5,987 Accela + ~5,894 HCS + 2,106 filings.
+
+    SOURCE SITE STRINGS (canonical — scraper builders MUST reuse these verbatim):
+      registry     : 'Montgomery County Parcels (AUDGIS)'
+      DCR          : 'Montgomery Daily Court Reporter'
+      RealForeclose: 'Montgomery Sheriff Sale (RealForeclose)'
+      probate      : 'Montgomery County Probate'
+      dcr-filing   : 'Montgomery Foreclosure Filings (DCR)'
+      delq-tax     : 'Montgomery Delinquent Tax' (signal)
+                     'Montgomery Tax Delinquent (Lead)' (lead surface)
+      code/blight  : 'Montgomery Code Violations' (signal)
+                     'Montgomery Code Violation (Lead)' (lead surface)
+    """
+
+    def registry_link(parcel: str | None, address: str | None,
+                      native_parcel_id: str | None = None) -> str:
+        # Montgomery County Real Estate (mcrealestate.org) — human-facing parcel lookup.
+        # No stable per-parcel deep-link param confirmed; opens the search page.
+        # Machine authority: AUDGIS_B1 L7 (gis.mcohio.org/server/…/MapServer/7).
+        # ASSUMPTION: mcrealestate.org is the live public portal — verify before go-live.
+        return "https://mcrealestate.org/"
+
+    def source_link(signal_type: str, parcel: str | None, case: str | None,
+                    sale_date, address: str | None,
+                    native_parcel_id: str | None = None) -> str:
+        sig = signal_type or ""
+        if sig == "probate":
+            return (
+                f"https://go.mcohio.org/"
+                f"   (Montgomery Probate — search estate case {case or '?'})"
+            )
+        elif sig in ("mortgage_foreclosure", "tax_delinquent_foreclosure"):
+            return (
+                "https://montgomery.sheriffsaleauction.ohio.gov/"
+                "   (Montgomery Sheriff Sale — find by case/parcel/date)"
+            )
+        elif sig == "tax_delinquent":
+            return "https://mcrealestate.org/   (MCRealestate — delinquent-tax record)"
+        elif sig == "code_violation":
+            # ASSUMPTION: Dayton Accela Citizen Access URL — confirm before go-live.
+            return "https://aca.daytonohio.gov/   (Dayton Accela — code/blight record)"
+        elif sig == "foreclosure_filing":
+            return "https://www.dailycourt.com/   (Daily Court Reporter — foreclosure filing)"
+        else:
+            return "https://mcrealestate.org/"
+
+    def offmarket_links(address: str, city: str | None, zip_: str | None) -> tuple[str, str]:
+        return _zillow_url(address, city, "OH", zip_), _redfin_url(address, city, "OH", zip_)
+
+    verification_guide = {
+        "mortgage_foreclosure": {
+            "valid": (
+                "Row still on the Montgomery Sheriff Sale (RealForeclose) roster with matching "
+                "case# and a sale date >= today. Mortgage signature: appraised property + "
+                "2/3-of-appraisal opening (R.C. 2329.52). MCRealestate confirms the owner of "
+                "record and shows no recent transfer."
+            ),
+            "red_flags": (
+                "Row dropped off the RealForeclose roster (sale cancelled / redeemed / settled). "
+                "Sale date is in the past (STALE). MCRealestate shows a new owner — already sold "
+                "(OH sale is FINAL at court confirmation)."
+            ),
+        },
+        "tax_delinquent_foreclosure": {
+            "valid": (
+                "Row on the RealForeclose Tuesday (tax) roster with the ORC 5721.19 tax signature "
+                "(Appraised $0.00 + flat deposit). Sale date >= today. MCRealestate confirms the "
+                "parcel + owner of record."
+            ),
+            "red_flags": (
+                "Row dropped off the roster (redeemed before sale / cancelled). Sale date past "
+                "(STALE). MCRealestate shows a transfer to a new private owner (paid off / sold)."
+            ),
+        },
+        "probate": {
+            "valid": (
+                "Montgomery County Probate (go.mcohio.org) shows the estate case OPEN. Case number "
+                "starts with a 4-digit year prefix (e.g. '2025EST…'). The decedent (NOT the "
+                "fiduciary) maps to a Montgomery residential parcel — real estate-in-probate where "
+                "heirs may want a fast sale."
+            ),
+            "red_flags": (
+                "Case Closed / Dismissed (settled — dead lead). Decedent doesn't map to any real "
+                "property. MCRealestate shows a transfer at-or-after the case filing year "
+                "(sold out of estate — auto-removed by the probate_transfer_rule guard)."
+            ),
+        },
+        # Pre-Distress LEADS (surface_distress.py) — surfaced only after buy-now is verified (G3).
+        "tax_delinquent": {
+            "valid": (
+                "On the Montgomery Treasurer delinquent tape (NETDELQ >= $2k, residential CLASS=R) "
+                "with a PRIVATE-party owner. PRE-DISTRESS LEAD — owner under tax pressure but NOT "
+                "yet for sale through any channel. Off-market on Zillow/Redfin is consistent (good)."
+            ),
+            "red_flags": (
+                "Balance cured / absent from the new monthly tape (resolved). Already on the "
+                "RealForeclose roster (that's a buy-now deal, not a lead). MCRealestate shows a "
+                "recent transfer to a new private owner (sold). Actively listed on MLS (note in outreach)."
+            ),
+        },
+        "code_violation": {
+            "valid": (
+                "Accela shows an OPEN/ACTIVE code/building violation, or HCS Grade >= 3 (chronic "
+                "blight), on a residential parcel with a PRIVATE-party owner. PRE-DISTRESS LEAD — "
+                "owner under municipal pressure, not yet selling. Off-market on Zillow/Redfin is "
+                "consistent with distress (good)."
+            ),
+            "red_flags": (
+                "Accela status is Closed/Abated (resolved — not distress). HCS grade < 3. Recent "
+                "transfer to a new owner on MCRealestate (already sold). Actively listed on MLS."
+            ),
+        },
+        "foreclosure_filing": {
+            "valid": (
+                "DCR /notices/foreclosures shows a foreclosure COMPLAINT filed in Montgomery Common "
+                "Pleas — the earliest distress stage, months before any sheriff sale. PRE-DISTRESS "
+                "LEAD: owner in the pipeline, property NOT yet at auction. MCRealestate confirms "
+                "the parcel + a private-party owner. Off-market on Zillow/Redfin is consistent (good)."
+            ),
+            "red_flags": (
+                "The case already advanced to the RealForeclose auction roster (buy-now deal now, "
+                "not a lead). Complaint dismissed/withdrawn. MCRealestate shows a transfer to a new "
+                "private owner (resolved). Actively listed on MLS."
+            ),
+        },
+    }
+
+    return {
+        "db": "tranchi",
+        "state": "OH",
+        # Letter-prefix PRINT_KEY is auto-detectable in the global format-detector — no separate
+        # market-dispatch function required (unlike Lucas whose 7-digit PARID is form-identical
+        # to Summit). normalize_parcel_number() Montgomery branch handles all three delimiter
+        # variants (spaced / hyphenated / no-delimiter) → one canonical collapsed uppercase form.
+        "parcel_normalize_fn": normalize_parcel_number,
+        "market_filter": "l.market = 'dayton'",
+        # Pre-distress lead surfacing (surface_distress.py). Montgomery sources:
+        #   tax_delinquent: address from SPINE (AUDGIS_B1 L7 PARLOC; Treasurer tape address is
+        #     unreliable). Payload key `delq_amount` follows the Summit/Lucas convention for
+        #     cross-market surface_distress compatibility. `cls` carries the CLASS field (R/C/…).
+        #     Regex guard on the cast column keeps malformed payload from aborting the INSERT.
+        #     MONTHLY cadence → 45-day freshness window so 3h surface_distress keeps leads alive.
+        #   code_violation: address from PAYLOAD (Accela carries the full situs); gate = OPEN/
+        #     ACTIVE status OR HCS grade >= 3 (numeric-cast guarded).
+        # distress_lead_types rows ship DISABLED — enabled only after buy-now is verified (G3).
+        "distress_lead_county": "Montgomery",
+        "distress_lead_rules": {
+            "tax_delinquent": {
+                "address_source": "spine",
+                "address_key": None,
+                "owner_key": "owner",
+                "gate_sql": (
+                    "((s.payload->>'delq_amount' ~ '^[0-9.]+$' "
+                    "  AND (s.payload->>'delq_amount')::numeric >= 2000) "
+                    " AND s.payload->>'cls' ~ '^R')"
+                ),
+                # MONTHLY cadence (Treasurer tape) — widen the signal-freshness window so the
+                # 3h surface_distress keeps leads live between monthly pulls (Summit/Lucas lesson).
+                "freshness_sql": "now() - interval '45 days'",
+            },
+            "code_violation": {
+                "address_source": "payload",
+                "address_key": "address_full",
+                "owner_key": None,
+                "gate_sql": (
+                    "(s.payload->>'status' ILIKE 'open' "
+                    " OR s.payload->>'status' ILIKE 'active' "
+                    " OR (s.payload->>'hcs_grade' ~ '^[0-9]+$' "
+                    "     AND (s.payload->>'hcs_grade')::numeric >= 3))"
+                ),
+            },
+        },
+        "deal_sources": (
+            "mortgage_foreclosure",
+            "tax_delinquent_foreclosure",
+            "probate",
+            "tax_delinquent",      # Pre-Distress LEAD (Treasurer monthly NETDELQ tape)
+            "code_violation",       # Pre-Distress LEAD (Accela live + HCS-2023 ArcGIS)
+            "foreclosure_filing",   # Pre-Distress SIGNAL (DCR Common Pleas complaints)
+        ),
+        "source_sites": {
+            # DCR is ONE feed emitting public_auctions (mortgage_foreclosure +
+            # tax_delinquent_foreclosure) AND foreclosure_filing notices — mapped to its
+            # primary deal type here. RealForeclose enriches with opening_bid_usd +
+            # appraised_value_usd joined by case# to DCR.
+            "Montgomery Daily Court Reporter": "mortgage_foreclosure",
+            "Montgomery Sheriff Sale (RealForeclose)": "mortgage_foreclosure",
+            "Montgomery County Probate": "probate",
+            "Montgomery Foreclosure Filings (DCR)": "foreclosure_filing",
+            "Montgomery Tax Delinquent (Lead)": "tax_delinquent",
+            "Montgomery Code Violation (Lead)": "code_violation",
+        },
+        # Per-source retirement policy (BLUEPRINT §3):
+        #   DCR public_auctions = cursor (forward-walk; kill on sale_date passed or dismissed).
+        #   RealForeclose = full_rescan (small ~8/wk roster; absence = resolved).
+        #   Probate = cursor (retired by case_status re-check via dayton_probate_recheck.py).
+        #   Signal sources own their retirement in-scraper (monthly tape refresh / daily --full
+        #   rescan) — not listed here.
+        "staleness_policies": {
+            "Montgomery Daily Court Reporter": "cursor",
+            "Montgomery Sheriff Sale (RealForeclose)": "full_rescan",
+            "Montgomery County Probate": "cursor",
+            # CRITICAL: cursor, not full_rescan — DCR filings are a growing back-catalog.
+            # Absence from a single feed cycle must NEVER retire old lis-pendens rows.
+            # Omitting this caused the May-2026 6,446-case class of bug on other sources.
+            "Montgomery Foreclosure Filings (DCR)": "cursor",
+        },
+        # Per-source public-site + role metadata for /api/v1/sources. (url, category).
+        # ASSUMPTIONS flagged with inline notes — verify before go-live.
+        "source_meta": {
+            "Montgomery County Parcels (AUDGIS)": (
+                "https://gis.mcohio.org/server/rest/services/VantagePoints/AUDGIS_B1/MapServer/7",
+                "registry",
+            ),
+            "Montgomery Daily Court Reporter": ("https://www.dailycourt.com/", "deal"),
+            "Montgomery Sheriff Sale (RealForeclose)": (
+                "https://montgomery.sheriffsaleauction.ohio.gov/", "deal"
+            ),
+            "Montgomery County Probate": ("https://go.mcohio.org/", "deal"),
+            "Montgomery Foreclosure Filings (DCR)": ("https://www.dailycourt.com/", "signal"),
+            # ASSUMPTION: Treasurer department URL — confirm exact bulk-tape download page.
+            "Montgomery Delinquent Tax": (
+                "https://www.mcohio.org/government/departments/treasurer/", "signal"
+            ),
+            # ASSUMPTION: Accela Citizen Access URL for Dayton — confirm before go-live.
+            "Montgomery Code Violations": ("https://aca.daytonohio.gov/", "signal"),
+            # Pre-distress LEADS (surface_distress.py) — category 'lead'.
+            "Montgomery Tax Delinquent (Lead)": (
+                "https://www.mcohio.org/government/departments/treasurer/", "lead"
+            ),
+            "Montgomery Code Violation (Lead)": ("https://aca.daytonohio.gov/", "lead"),
+        },
+        # Montgomery probate case numbers encode the filing year as the first 4 chars
+        # (e.g. '2025EST00123'). Same shape as Cuyahoga EST numbers (BLUEPRINT §3 probate row).
+        # The transfer guard pulls the year via substring(1,4); case_regex identifies a
+        # Montgomery probate case (run.py::_transfer_predicate).
+        "probate_transfer_rule": {
+            "case_regex": r"^[0-9]{4}EST",
+            "filing_year_substr": (1, 4),
+        },
+        # OH sale is FINAL at court confirmation — no statutory owner redemption window.
+        "redemption_windows": None,
+        # Live cross-verify endpoints (scripts/playwright_source_check.py reads URLs from here).
+        # ASSUMPTIONS flagged inline — confirm before wiring the verifier script.
+        "verifier_endpoints": {
+            # Verified live endpoint from the field-map (gis.mcohio.org/server/ NOT /arcgis/).
+            "audgis_query": (
+                "https://gis.mcohio.org/server/rest/services/VantagePoints/AUDGIS_B1/MapServer/7/query"
+            ),
+            # ASSUMPTION: confirm exact parcel-search URL at mcrealestate.org.
+            "mcrealestate_base": "https://mcrealestate.org/",
+            "realforeclose_base": "https://montgomery.sheriffsaleauction.ohio.gov/",
+            "dcr_base": "https://www.dailycourt.com/",
+            "probate_base": "https://go.mcohio.org/",
+        },
+        "registry_link": registry_link,
+        "registry_label": "Montgomery County Auditor — MCRealestate Property Search",
+        "registry_search_hint": (
+            "Opens mcrealestate.org — type the PRINT_KEY (e.g. 'R72 11703 0016') or the "
+            "street address to pull the current-owner record. The AUDGIS_B1 L7 MapServer is "
+            "the machine authority behind our stored owner and situs address (PARLOC). "
+            "ASSUMPTION: confirm the search URL form at mcrealestate.org before go-live."
+        ),
+        "registry_look_for": (
+            "(1) Owner name on MCRealestate should match our stored owner_name. "
+            "(2) Situs address (PARLOC) should match our stored address. "
+            "(3) The most recent transfer date — a transfer at-or-after a probate case's "
+            "filing year means the property already sold out of the estate; "
+            "_mark_transferred_listings removes such listings automatically via the "
+            "probate_transfer_rule guard (^[0-9]{4}EST, substring(1,4))."
+        ),
+        "source_link": source_link,
+        "offmarket_links": offmarket_links,
+        "verification_guide": verification_guide,
+    }
+
+
 # The market registry. To add a market: implement _make_<market>_market() and add it here.
 MARKETS: dict[str, dict] = {
     "cuyahoga": _make_cuyahoga_market(),
@@ -1357,6 +1650,7 @@ MARKETS: dict[str, dict] = {
     "summit": _make_summit_market(),
     "wayne": _make_wayne_market(),
     "lucas": _make_lucas_market(),
+    "dayton": _make_dayton_market(),
 }
 
 
@@ -1435,6 +1729,23 @@ MARKET_SCRAPERS: dict[str, dict] = {
             "lucas_landbank",             # Lucas (OH) Land Bank owned inventory BUY-NOW listings (Auditor CAMA GIS)
         ],
     },
+    "dayton": {
+        # 273K AUDGIS_B1 L7 parcel sweep too heavy for the 3h run → own weekly cron
+        # (--site dayton_parcels, Sun 0:00 UTC per BLUEPRINT §4). The 3h cycle runs
+        # legalnews + realforeclose + probate. delinquent_tax and code_violations run on
+        # their own crons (SELF_SCHEDULED_SOURCES) — registered here for market_for_scraper
+        # lookup but excluded from full_run_skip_keys() → no 3h-cycle execution.
+        "registry": "dayton_parcels",
+        "registry_in_full_run": False,
+        "deal_and_signal": [
+            "dayton_legalnews",              # DCR TNCMS JSON — public_auctions (primary)
+            "dayton_foreclosure_filings",    # DCR TNCMS JSON — foreclosure_filing signals (separate key)
+            "dayton_realforeclose",          # RealForeclose — enrich opening_bid_usd + appraised_value_usd
+            "dayton_probate",                # Montgomery Probate go.mcohio.org — cursor + weekly recheck
+            "dayton_delinquent_tax",         # Treasurer monthly bulk tape — SELF_SCHEDULED (monthly 1st)
+            "dayton_code_violations",        # Accela live + HCS-2023 ArcGIS — SELF_SCHEDULED (daily --full)
+        ],
+    },
 }
 
 
@@ -1476,6 +1787,8 @@ def merged_source_meta() -> dict[str, tuple[str | None, str]]:
 SELF_SCHEDULED_SOURCES: set[str] = {
     "lucas_areis_delinquent",     # full AREIS COLLECTION delinquent roll (99MB) — MONTHLY
     "lucas_vacant_delinquent",    # Auditor vacant-delinquent GIS — MONTHLY
+    "dayton_delinquent_tax",      # Montgomery Treasurer bulk tape Delq_YYYYMMDD.zip — MONTHLY 1st
+    "dayton_code_violations",     # Accela live + HCS-2023 ArcGIS full rescan — DAILY (45 6 * * *)
 }
 
 

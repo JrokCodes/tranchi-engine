@@ -75,6 +75,15 @@ from app.scrapers.shelby_parcels import ShelbyParcelsScraper  # noqa: E402
 from app.scrapers.summit_parcels import SummitParcelsScraper  # noqa: E402
 from app.scrapers.lucas_parcels import LucasParcelsScraper  # noqa: E402
 from app.scrapers.wayne_parcels import WayneParcelsScraper  # noqa: E402
+from app.scrapers.dayton_parcels import DaytonParcelsScraper  # noqa: E402
+from app.scrapers.dayton_legalnews import (  # noqa: E402
+    DaytonPublicAuctionsScraper,
+    DaytonForeclosureFilingsScraper,
+)
+from app.scrapers.dayton_realforeclose import DaytonRealForecloseScraper  # noqa: E402
+from app.scrapers.dayton_probate import DaytonProbateScraper  # noqa: E402
+from app.scrapers.dayton_delinquent_tax import DaytonDelinquentTaxScraper  # noqa: E402
+from app.scrapers.dayton_code_violations import DaytonCodeViolationsScraper  # noqa: E402
 from app.scrapers.wayne_foreclosure import WayneForeclosureScraper  # noqa: E402
 from app.scrapers.wayne_dlba import WayneDLBAScraper  # noqa: E402
 from app.scrapers.wayne_wclb import WayneCountyLandBankScraper  # noqa: E402
@@ -157,6 +166,13 @@ _SCRAPERS: dict[str, type] = {
     "lucas_areis_delinquent": LucasAreisDelinquentScraper,  # Lucas (OH) FULL certified-delinquent roll (public AREIS COLLECTION .mdb) — primary tax_delinquent
     "lucas_forfeited_land": LucasForfeitedLandScraper,  # Lucas (OH) forfeited-land tax-deed BUY-NOW listings (Auditor GIS)
     "lucas_landbank": LucasLandBankScraper,  # Lucas (OH) Land Bank owned inventory BUY-NOW listings (Auditor CAMA GIS owner filter)
+    "dayton_parcels": DaytonParcelsScraper,  # Montgomery County (OH / Dayton) registry spine (AUDGIS_B1 MapServer/7, ArcGIS)
+    "dayton_legalnews": DaytonPublicAuctionsScraper,       # Montgomery DCR TNCMS JSON — public auction listings (mortgage_foreclosure)
+    "dayton_foreclosure_filings": DaytonForeclosureFilingsScraper,  # Montgomery DCR TNCMS JSON — foreclosure_filing SIGNAL (pre-distress lis-pendens)
+    "dayton_realforeclose": DaytonRealForecloseScraper,    # Montgomery sheriff sale RealForeclose — opening_bid_usd + appraised_value_usd enrichment
+    "dayton_probate": DaytonProbateScraper,                # Montgomery Probate go.mcohio.org — cursor walk, name→parcel join, weekly recheck
+    "dayton_delinquent_tax": DaytonDelinquentTaxScraper,   # Montgomery Treasurer bulk tape — tax_delinquent SIGNAL (SELF_SCHEDULED monthly)
+    "dayton_code_violations": DaytonCodeViolationsScraper, # Montgomery Accela + HCS-2023 ArcGIS — code_violation SIGNAL (SELF_SCHEDULED daily)
 }
 
 
@@ -258,6 +274,11 @@ async def _run_scraper(
         # ~192K parcels = ~96 pages. max_parcels=None = full sweep.
         # For a test run: LucasParcelsScraper(max_parcels=500).
         scraper = scraper_cls()
+    elif scraper_key == "dayton_parcels":
+        # Full sweep of Montgomery County (OH) Auditor AUDGIS_B1 Layer 7 at 2000/page.
+        # ~273K parcels = ~137 pages. max_parcels=None = full sweep.
+        # For a test run: DaytonParcelsScraper(max_parcels=500).
+        scraper = scraper_cls()
     elif scraper_key == "wayne_foreclosure":
         # Resolves notice/auction street addresses to Wayne parcels against tranchi.parcels
         # (market='wayne', house# + zip + street), so it needs the pool. Plain ListingScraper.
@@ -300,6 +321,22 @@ async def _run_scraper(
         # spine owner (keep only still-FORFEITED parcels), so it needs the pool. Output
         # flows through the listing path below.
         scraper = scraper_cls(pool=pool, dry_run=dry_run)
+    elif scraper_key == "dayton_probate":
+        # Manages its own cursor (tranchi.dayton_probate_cursor), cross-refs the spine
+        # for the decedent-name→owner_name join (market='dayton'), and writes probate
+        # signals — needs pool + dry_run. ColdFusion httpx access (no Playwright).
+        # Plain ListingScraper out; retired ONLY via dayton_probate_recheck.py.
+        scraper = scraper_cls(pool=pool, dry_run=dry_run)
+    elif scraper_key == "dayton_code_violations":
+        # DaytonCodeViolationsScraper takes both last_run_date AND full_rescan (unlike the
+        # base CodeViolationsScraper which takes last_run_date only). Must NOT go through
+        # _DELTA_PULL_SCRAPERS (which calls scraper_cls(last_run_date=...) without full_rescan).
+        # full_rescan=True is the SELF_SCHEDULED daily cron mode; incremental via last_run_date
+        # is the fallback for the 3h run (excluded via SELF_SCHEDULED_SOURCES in practice).
+        _probe = scraper_cls.__new__(scraper_cls)
+        site_name_for_query = getattr(_probe, "site_name", scraper_key)
+        last_run_date = None if full else await _get_last_successful_run(pool, site_name_for_query)
+        scraper = scraper_cls(last_run_date=last_run_date, full_rescan=full)
     else:
         scraper = scraper_cls()
     site_name = scraper.site_name
@@ -308,7 +345,7 @@ async def _run_scraper(
     try:
         logger.info("Starting scraper: %s", site_name)
 
-        if scraper_key in ("fiscal_officer", "shelby_parcels", "summit_parcels", "wayne_parcels", "lucas_parcels"):
+        if scraper_key in ("fiscal_officer", "shelby_parcels", "summit_parcels", "wayne_parcels", "lucas_parcels", "dayton_parcels"):
             # ── Registry path ──────────────────────────────────────────────────
             # Registry scrapers are parcel identity spines, not deal-listing feeds.
             # We populate tranchi.parcels only; tranchi.listings is never touched.
@@ -1103,6 +1140,49 @@ async def _compute_mi_redemption(pool: asyncpg.Pool) -> int:
         return 0
 
 
+async def _enrich_realforeclose_into_dcr(pool: asyncpg.Pool) -> int:
+    """Propagate opening_bid_usd / appraised_value_usd from RealForeclose rows to DCR rows.
+
+    WHY: _upsert_one in db.py scopes ON CONFLICT to the SAME source_site, so the canonical
+    DCR row (older first_seen_at wins dedup) never receives the bid/appraisal written by the
+    RealForeclose scraper (different source_site). This cross-source UPDATE fills those columns
+    on the canonical DCR row by case_number JOIN — COALESCE-only, never clobbers an existing
+    value. Idempotent; runs in the full-run post-processing block.
+
+    DCR site_name: 'Montgomery Daily Court Reporter'
+    RealForeclose site_name: 'Montgomery Sheriff Sale (RealForeclose)'
+    Join key: case_number (the mortgage case number both sources record, e.g. 'CV 2026 05 1234').
+    """
+    try:
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                UPDATE tranchi.listings dcr
+                   SET opening_bid_usd     = COALESCE(dcr.opening_bid_usd, rf.opening_bid_usd),
+                       appraised_value_usd = COALESCE(dcr.appraised_value_usd, rf.appraised_value_usd)
+                  FROM tranchi.listings rf
+                 WHERE dcr.source_site  = 'Montgomery Daily Court Reporter'
+                   AND rf.source_site   = 'Montgomery Sheriff Sale (RealForeclose)'
+                   AND dcr.case_number  IS NOT NULL
+                   AND rf.case_number   IS NOT NULL
+                   AND dcr.case_number  = rf.case_number
+                   AND dcr.market       = 'dayton'
+                   AND rf.market        = 'dayton'
+                   AND (dcr.opening_bid_usd IS NULL OR dcr.appraised_value_usd IS NULL)
+                   AND (rf.opening_bid_usd IS NOT NULL OR rf.appraised_value_usd IS NOT NULL)
+                """
+            )
+            count = int(result.split()[-1]) if result else 0
+            if count > 0:
+                logger.info(
+                    "RealForeclose→DCR enrich: filled bid/appraisal on %d DCR rows", count
+                )
+            return count
+    except Exception as exc:
+        logger.warning("RealForeclose→DCR enrichment failed: %s", exc)
+        return 0
+
+
 async def main() -> int:
     parser = argparse.ArgumentParser(
         description="Tranchi Engine — run deal-sourcing scrapers",
@@ -1208,6 +1288,12 @@ async def main() -> int:
                 redeem_win, mi_redeem, finalized, dupes,
             )
             logger.info("Post-run: blight-tiers %s", blight_tiers.get("tier_split", blight_tiers))
+
+            # Cross-source bid/appraisal fill: RealForeclose → DCR canonical rows.
+            # Must run after upsert_listings so both source rows are in the DB.
+            rf_enriched = await _enrich_realforeclose_into_dcr(pool)
+            if rf_enriched:
+                logger.info("Post-run: RealForeclose→DCR enrichment filled %d rows", rf_enriched)
 
             # Collapse tripwire: page immediately if any source's active count cratered
             # vs its previous run (the safety net missing on 2026-06-21 when blight went
