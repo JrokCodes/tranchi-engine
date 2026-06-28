@@ -952,6 +952,52 @@ def _transfer_predicate() -> str:
     return " OR ".join(clauses)
 
 
+async def _resolve_dayton_listing_parcels(pool: asyncpg.Pool) -> int:
+    """Link parcel-less Dayton foreclosure listings to a real AUDGIS spine parcel by exact
+    normalized address. DCR notices that don't carry an extractable parcel arrive address-only;
+    without a parcel they can't be sold-checked (transfer guard) or county-validated, so stale
+    ones (property already sold) persist. Match property_address -> parcels.situs_address,
+    normalized as upper / strip non-alphanumeric / collapse spaces. Link ONLY when the address
+    maps to EXACTLY ONE spine parcel (window count = 1) — never mis-join condos / splits /
+    duplicate-situs addresses. Market-scoped to dayton. Returns count linked.
+
+    Ordering: runs before _ensure_parcels_for_listings + the transfer/phantom guards so a
+    newly-linked sold-out listing retires in the same pass. Idempotent (only fills NULLs).
+    """
+    _norm = (
+        "regexp_replace(regexp_replace(upper(trim({col})), '[^A-Z0-9 ]', '', 'g'), ' +', ' ', 'g')"
+    )
+    try:
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                f"""
+                UPDATE tranchi.listings AS l
+                SET source_listing_id = m.parcel_number
+                FROM (
+                    SELECT na, parcel_number FROM (
+                        SELECT parcel_number,
+                               {_norm.format(col='situs_address')} AS na,
+                               count(*) OVER (PARTITION BY {_norm.format(col='situs_address')}) AS n
+                        FROM tranchi.parcels
+                        WHERE market = 'dayton' AND situs_address IS NOT NULL AND situs_address <> ''
+                    ) z WHERE z.n = 1
+                ) AS m
+                WHERE l.market = 'dayton'
+                  AND l.status = 'active'
+                  AND (l.source_listing_id IS NULL OR l.source_listing_id = '')
+                  AND l.signal_type IN ('mortgage_foreclosure', 'foreclosure_filing', 'tax_delinquent_foreclosure')
+                  AND {_norm.format(col='l.property_address')} = m.na
+                """
+            )
+            count = int(result.split()[-1]) if result else 0
+            if count > 0:
+                logger.info("Dayton: linked %d parcel-less listings to spine by address", count)
+            return count
+    except Exception as exc:
+        logger.warning("Dayton address->parcel resolution failed: %s", exc)
+        return 0
+
+
 async def _retire_unverifiable_dayton_foreclosures(pool: asyncpg.Pool) -> int:
     """Retire Dayton foreclosure listings whose parcel has NO Montgomery Auditor (AUDGIS)
     data — i.e. a phantom registry stub (owner/last_sale/value all NULL). The DCR feed is
@@ -1325,6 +1371,10 @@ async def main() -> int:
         if not args.dry_run and not args.site:
             delisted = await _mark_stale_listings(pool, results, run_start)
             expired = await _mark_expired_listings(pool)
+            # Link parcel-less Dayton foreclosure listings to a real spine parcel by address
+            # BEFORE stub-creation + the transfer/phantom guards, so address-only notices get
+            # sold-checked + county-validated this same pass instead of lingering unverifiable.
+            await _resolve_dayton_listing_parcels(pool)
             stubs = await _ensure_parcels_for_listings(pool)
             owner_bf = await _backfill_owner_from_delinquency(pool)
             # Surface pre-distress signal parcels as distress_stage='distress_signal' LEADS
