@@ -1606,6 +1606,17 @@ def _make_dayton_market() -> dict:
             "case_regex": r"^[0-9]{4}EST",
             "filing_year_substr": (1, 4),
         },
+        # Foreclosure sold-after-filing guard (run.py::_transfer_predicate). Montgomery CV
+        # foreclosure case numbers encode the filing year as the first 4 chars ('2018CV03441',
+        # '2011 CV 02108'). A parcel whose last_sale_date is at/after the filing year changed
+        # hands after the foreclosure opened => the foreclosure resolved (sheriff sale completed
+        # or owner sold to cure) => no longer a live lead. Mirrors the probate rule but for the
+        # mortgage_foreclosure / foreclosure_filing / tax_delinquent_foreclosure signal types.
+        # Market-scoped in the predicate so it never touches other markets' foreclosures.
+        "foreclosure_transfer_rule": {
+            "case_regex": r"^[0-9]{4}",
+            "filing_year_substr": (1, 4),
+        },
         # OH sale is FINAL at court confirmation — no statutory owner redemption window.
         "redemption_windows": None,
         # Live cross-verify endpoints (scripts/playwright_source_check.py reads URLs from here).

@@ -881,7 +881,7 @@ async def _mark_transferred_listings(pool: asyncpg.Pool) -> int:
             count = int(result.split()[-1]) if result else 0
             if count > 0:
                 logger.info(
-                    "Transferred detection: marked %d probate listings as transferred", count
+                    "Transferred detection: marked %d listings as transferred (sold-out)", count
                 )
             return count
     except Exception as exc:
@@ -926,9 +926,71 @@ def _transfer_predicate() -> str:
         if clause not in seen:
             seen.add(clause)
             clauses.append(clause)
+    # (1b) FORECLOSURE (sold-after-filing, per market declaring `foreclosure_transfer_rule`):
+    # a mortgage_foreclosure / foreclosure_filing / tax_delinquent_foreclosure listing whose
+    # parcel sold at/after the CV case filing year — the foreclosure resolved (sheriff sale
+    # completed or owner sold to cure). MARKET-SCOPED (l.market = the declaring market) so it
+    # never retroactively retires another market's foreclosures. Catches the sold-BEFORE-ingest
+    # case that rule (2) deliberately skips (old DCR notices for already-sold properties).
+    for mkt, cfg in MARKETS.items():
+        frule = cfg.get("foreclosure_transfer_rule")
+        if not frule or "filing_year_substr" not in frule:
+            continue
+        fstart, flength = frule["filing_year_substr"]
+        fclause = (
+            f"(l.market = '{mkt}' "
+            "AND l.signal_type IN ('mortgage_foreclosure', 'foreclosure_filing', 'tax_delinquent_foreclosure') "
+            f"AND l.case_number ~ '{frule['case_regex']}' "
+            "AND p.last_sale_date >= make_date("
+            f"CAST(substring(l.case_number FROM {int(fstart)} FOR {int(flength)}) AS INTEGER), 1, 1))"
+        )
+        if fclause not in seen:
+            seen.add(fclause)
+            clauses.append(fclause)
     # (2) any source: parcel changed hands after we first listed it.
     clauses.append("(p.last_sale_date > l.first_seen_at::date)")
     return " OR ".join(clauses)
+
+
+async def _retire_unverifiable_dayton_foreclosures(pool: asyncpg.Pool) -> int:
+    """Retire Dayton foreclosure listings whose parcel has NO Montgomery Auditor (AUDGIS)
+    data — i.e. a phantom registry stub (owner/last_sale/value all NULL). The DCR feed is
+    regional (carries Butler/Warren/Greene/Logan notices too); their letter-prefix parcels
+    slip past the in-scraper Montgomery filter and create stubs that never enrich. A listing
+    whose parcel can't be confirmed against the county registry is unverifiable, so it must
+    not surface (Tranchi registry-coverage invariant). Market-scoped to dayton.
+
+    NOTE: this also catches real Montgomery parcels that arrived in a non-canonical DCR
+    display format (hyphens / embedded letters, e.g. 'N64-502-14-117') and so failed to
+    normalize onto the spine — a separate normalizer gap tracked for v1.1. Until the
+    normalizer covers those formats they are genuinely unverifiable and correctly withheld.
+    """
+    try:
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                UPDATE tranchi.listings AS l
+                SET status = 'expired'
+                FROM tranchi.parcels AS p
+                WHERE l.source_listing_id = p.parcel_number
+                  AND l.market = 'dayton'
+                  AND p.market = 'dayton'
+                  AND l.status = 'active'
+                  AND l.signal_type IN ('mortgage_foreclosure', 'foreclosure_filing', 'tax_delinquent_foreclosure')
+                  AND p.owner_name IS NULL
+                  AND p.last_sale_date IS NULL
+                  AND p.current_market_value IS NULL
+                """
+            )
+            count = int(result.split()[-1]) if result else 0
+            if count > 0:
+                logger.info(
+                    "Dayton: retired %d foreclosure listings on unverifiable/cross-county parcels", count
+                )
+            return count
+    except Exception as exc:
+        logger.warning("Dayton unverifiable-foreclosure retire failed: %s", exc)
+        return 0
 
 
 async def _flag_incomplete_addresses(pool: asyncpg.Pool) -> int:
@@ -1274,6 +1336,7 @@ async def main() -> int:
             blight_tiers = await tier_wayne_blight_leads(pool)
             no_num = await _flag_incomplete_addresses(pool)
             transferred = await _mark_transferred_listings(pool)
+            await _retire_unverifiable_dayton_foreclosures(pool)
             redeem_win = await _compute_redemption_windows(pool)
             mi_redeem = await _compute_mi_redemption(pool)
             finalized = await _finalize_expired_redemptions(pool)
