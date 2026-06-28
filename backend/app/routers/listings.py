@@ -106,6 +106,11 @@ class ListingItem(BaseModel):
     blight_ticket_count: int | None = None
     blight_total_balance: float | None = None
     absentee_owner: bool | None = None
+    # Owner is a business/investor entity (LLC/Inc/Capital/Properties/Realty…), derived at
+    # read-time from the county owner_name. Distinct from absentee_owner (mailing-addr based,
+    # Wayne-only). Lets the UI badge + deprioritize entity-owned pre-distress leads. NULL when
+    # owner_name is unknown. See _ENTITY_OWNER_RE.
+    owner_is_entity: bool | None = None
     first_seen_at: datetime | None
     last_seen_at: datetime | None
     signal_count: int
@@ -289,6 +294,7 @@ def _row_to_item(r: asyncpg.Record) -> ListingItem:
         blight_ticket_count=r["blight_ticket_count"],
         blight_total_balance=_to_float(r["blight_total_balance"]),
         absentee_owner=r["absentee_owner"],
+        owner_is_entity=r["owner_is_entity"],
         first_seen_at=r["first_seen_at"],
         last_seen_at=r["last_seen_at"],
         signal_count=sig_count,
@@ -323,7 +329,23 @@ def _row_to_item(r: asyncpg.Record) -> ListingItem:
 # GET /api/v1/listings
 # ─────────────────────────────────────────────────────────────────────────────
 
-_BASE_SELECT = """
+# Owner-name classification: business/investor ENTITY (LLC, Inc, Capital, Properties, Holdings,
+# Realty, Investments…). Flags entity-owned pre-distress LEADS so users can deprioritize them — a
+# professional landlord/flipper is a weaker motivated-seller lead than an individual owner-occupant
+# (e.g. an LLC renting out a renovated house with an old code-violation ticket). Validated against
+# live owner_name 2026-06-28: 0 false positives; DELIBERATELY EXCLUDES trust / bank-REO / church /
+# government (those are different lead categories, not "investor"). Derived at read-time from the
+# already-joined county owner_name — no stored column. ~11-31% of leads per market.
+_ENTITY_OWNER_RE = (
+    r"\y(LLC|L L C|INC|CORP|LTD|LP|COMPANY|CAPITAL|PROPERTIES|PROPERTY|HOLDINGS|HOLDING|"
+    r"INVESTMENT|INVESTMENTS|INVESTOR|INVESTORS|REALTY|REAL ESTATE|RENTAL|RENTALS|HOMES|GROUP|"
+    r"PARTNERS|VENTURES|ASSET|ASSETS|EQUITY|ENTERPRISE|ENTERPRISES|MANAGEMENT|DEVELOPMENT)\y"
+)
+# SQL predicate (one source of truth: reused by the SELECT column + the owner_type filter).
+# NULL owner_name → NULL → owner_is_entity null (matches the registry_confirmed semantics).
+_ENTITY_OWNER_PRED = f"(p.owner_name ~* '{_ENTITY_OWNER_RE}')"
+
+_BASE_SELECT = f"""
     SELECT
         l.id,
         l.source_site,
@@ -369,6 +391,7 @@ _BASE_SELECT = """
         sig.type_counts                 AS type_counts,
         COALESCE(p.owner_name, '(Owner not found)') AS owner_name,
         (p.owner_name IS NOT NULL)      AS registry_confirmed,
+        {_ENTITY_OWNER_PRED}            AS owner_is_entity,
         p.situs_address,
         p.current_market_value,
         p.current_tax_balance,
@@ -416,6 +439,7 @@ def _build_where(
     min_balance: float | None = None,
     min_tickets: int | None = None,
     absentee: bool | None = None,
+    owner_type: str | None = None,
     include_duplicates: bool = False,
     include_unverified: bool = False,
 ) -> tuple[list[str], list, int]:
@@ -504,6 +528,14 @@ def _build_where(
     if absentee is True:
         conditions.append("l.absentee_owner IS TRUE")
 
+    # Owner-type filter (entity = LLC/investor by owner_name; individual = everything else).
+    # 'individual' is the "deprioritize investor-owned" toggle — keeps owner-less rows visible
+    # (NULL owner_name shouldn't silently drop a lead). Uses the same predicate as the SELECT.
+    if owner_type == "entity":
+        conditions.append(_ENTITY_OWNER_PRED)
+    elif owner_type == "individual":
+        conditions.append(f"(p.owner_name IS NULL OR NOT {_ENTITY_OWNER_PRED})")
+
     # Always-on probate validity gate (Marc's #1 rule: open cases only). A probate
     # listing whose court case_status reads closed/disposed/terminated/dismissed is
     # no longer a live lead — the estate is settled and the property has transferred.
@@ -559,6 +591,7 @@ async def list_listings(
     min_balance: float | None = Query(default=None, ge=0, description="Min blight_total_balance (pre-distress lead filter)"),
     min_tickets: int | None = Query(default=None, ge=0, description="Min blight_ticket_count (pre-distress lead filter)"),
     absentee: bool | None = Query(default=None, description="Only absentee-owner blight leads"),
+    owner_type: str | None = Query(default=None, description="Filter by owner type: 'individual' (deprioritize investor-owned) | 'entity' (LLC/investor only)"),
     redemption_status: str | None = Query(default=None, description="TN tax-deed lifecycle: pending|redeemed|final"),
     has_signals: bool | None = Query(default=None),
     min_signals: int | None = Query(default=None, ge=0),
@@ -599,6 +632,7 @@ async def list_listings(
         min_balance=min_balance,
         min_tickets=min_tickets,
         absentee=absentee,
+        owner_type=owner_type,
         include_duplicates=include_duplicates,
         include_unverified=include_unverified,
     )
@@ -616,6 +650,10 @@ async def list_listings(
             FROM tranchi.signals s
             WHERE s.parcel_number = l.source_listing_id
         ) sig ON true
+        -- Parcel join (mirrors _BASE_SELECT) so the owner_type filter's p.owner_name
+        -- predicate resolves here too — keeps COUNT consistent with the data query.
+        LEFT JOIN tranchi.parcels p
+          ON p.parcel_number = l.source_listing_id AND p.market = l.market
         {where_sql}
     """
     total: int = await conn.fetchval(count_sql, *params)
