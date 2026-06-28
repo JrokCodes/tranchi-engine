@@ -61,7 +61,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -246,6 +246,25 @@ def _content_to_text(content: Any) -> str:
         else:
             parts.append(raw.strip())
     return "\n".join(p for p in parts if p)
+
+
+# Max age of a public_auctions notice (by DCR publish date) to still count as a current
+# buy-now auction. OH sheriff sales are noticed ~3 weeks pre-sale, so anything published
+# this long ago is a historical notice, not an upcoming auction. Guards against the years
+# of old (2008+) notices in the feed slipping past the sale_date<today filter when undated.
+_MAX_AUCTION_NOTICE_AGE_DAYS = 90
+
+
+def _notice_publish_date(row: dict[str, Any]) -> date | None:
+    """DCR TNCMS notice publish date from row['starttime']['utc'] (ms epoch). None-safe."""
+    st = row.get("starttime") or {}
+    utc = st.get("utc") if isinstance(st, dict) else None
+    if not utc:
+        return None
+    try:
+        return datetime.utcfromtimestamp(int(utc) / 1000).date()
+    except (ValueError, TypeError, OverflowError):
+        return None
 
 
 def _parse_date_flexible(raw: str | None) -> date | None:
@@ -598,6 +617,15 @@ def _row_to_auction_listing(row: dict[str, Any], today: date) -> RawListing | No
     # ── INVARIANT: Logan filter ──────────────────────────────────────────────
     if not _is_montgomery(parcels, full):
         logger.debug("DCR auctions: DROP non-Montgomery row title=%r", title[:80])
+        return None
+
+    # ── Staleness guard: drop historical notices (public_auctions only) ──────────
+    # The feed carries years of old sheriff-sale notices; a current auction is
+    # published within weeks of the sale. Without this, undated old notices bypass
+    # the sale_date<today filter below and pollute the active buy-now feed.
+    pub_date = _notice_publish_date(row)
+    if pub_date is not None and pub_date < today - timedelta(days=_MAX_AUCTION_NOTICE_AGE_DAYS):
+        logger.debug("DCR auctions: DROP stale notice published %s (title=%r)", pub_date, title[:60])
         return None
 
     # Parse remaining fields
