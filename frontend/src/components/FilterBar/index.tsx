@@ -22,6 +22,9 @@ export interface FilterState {
   min_balance: string;   // string so the input is controlled; converted to number when sent to API
   min_tickets: string;   // same
   absentee: boolean;
+  // Owner-type filter for pre-distress leads (any market). '' = all owners; 'individual'
+  // deprioritizes investor/LLC-owned leads; 'entity' = investor-owned only.
+  owner_type: 'individual' | 'entity' | '';
 }
 
 export const STAGE_OPTIONS: { label: string; value: string }[] = [
@@ -44,6 +47,7 @@ export const defaultFilters: FilterState = {
   min_balance: '',
   min_tickets: '',
   absentee: false,
+  owner_type: '',
 };
 
 const STATUS_OPTIONS: { label: string; value: string }[] = [
@@ -196,6 +200,9 @@ export function FilterBar({ filters, onChange, onClear }: Props) {
   const isWaynePreDistress =
     filters.distress_stage === 'distress_signal' && filters.county === 'Wayne';
 
+  // Pre-Distress view, ANY market — gates the owner-type (investor) filter.
+  const isPreDistress = filters.distress_stage === 'distress_signal';
+
   const isFiltered =
     !!filters.county ||
     !!filters.source_site ||
@@ -205,7 +212,8 @@ export function FilterBar({ filters, onChange, onClear }: Props) {
     !!filters.conviction_tier ||
     !!filters.min_balance ||
     !!filters.min_tickets ||
-    filters.absentee;
+    filters.absentee ||
+    !!filters.owner_type;
 
   return (
     <div className="flex flex-wrap items-center gap-2">
@@ -344,6 +352,30 @@ export function FilterBar({ filters, onChange, onClear }: Props) {
             Absentee
           </button>
         </>
+      )}
+
+      {/* Individuals-only toggle — Pre-Distress view, ANY market. Hides investor/LLC-owned
+          leads (a professional landlord/flipper is a weaker motivated-seller lead). Opt-in. */}
+      {isPreDistress && (
+        <button
+          type="button"
+          onClick={() =>
+            onChange({
+              ...filters,
+              owner_type: filters.owner_type === 'individual' ? '' : 'individual',
+            })
+          }
+          aria-pressed={filters.owner_type === 'individual'}
+          title="Hide investor / LLC-owned leads — show only individual owners"
+          className={cn(
+            'h-9 px-3 text-[13px] rounded-full border transition-colors whitespace-nowrap font-medium',
+            filters.owner_type === 'individual'
+              ? 'bg-(--color-navy) text-white border-(--color-navy)'
+              : 'bg-white text-(--color-slate) border-(--color-border) hover:border-(--color-navy)/30 hover:text-(--color-ink)'
+          )}
+        >
+          Individuals only
+        </button>
       )}
 
       {/* Clear */}

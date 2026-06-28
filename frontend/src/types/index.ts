@@ -87,6 +87,10 @@ export interface ApiListingItem {
   blight_ticket_count: number | null;
   blight_total_balance: number | null;
   absentee_owner: boolean | null;
+  // Owner is a business/investor entity (LLC/Inc/Capital/Properties/Realty…), derived server-side
+  // from the county owner_name. Surfaces the "Investor" badge + the Individuals-only filter on
+  // pre-distress leads. Distinct from absentee_owner. Null when owner unknown.
+  owner_is_entity: boolean | null;
 }
 
 export interface VerifyLinks {

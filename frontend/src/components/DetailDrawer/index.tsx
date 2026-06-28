@@ -263,6 +263,21 @@ function DrawerContent({ listingId, onClose }: { listingId: string; onClose: () 
         </div>
       )}
 
+      {/* Owner type (any-market pre-distress leads): entity/investor-owned = weaker seller lead */}
+      {listing.owner_is_entity && listing.distress_stage === 'distress_signal' && (
+        <div>
+          <SectionLabel>Owner Type</SectionLabel>
+          <div className="bg-white rounded-xl border border-(--color-border) p-4 flex items-center gap-2">
+            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium border bg-(--color-navy)/5 text-(--color-navy) border-(--color-navy)/15 whitespace-nowrap">
+              Investor
+            </span>
+            <span className="text-[13px] text-(--color-slate)">
+              Business/investor entity (LLC, Inc, Capital…) — a weaker motivated-seller lead than an individual owner-occupant.
+            </span>
+          </div>
+        </div>
+      )}
+
       {/* Probate case (probate listings only) — decedent vs current owner is the verification value */}
       {listing.decedent_name && (
         <div>

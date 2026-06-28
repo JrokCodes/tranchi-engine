@@ -21,6 +21,9 @@ export interface ListingFilters {
   min_balance?: number;
   min_tickets?: number;
   absentee?: boolean;
+  // Owner-type filter for pre-distress leads (any market): 'individual' deprioritizes
+  // investor/LLC-owned leads; 'entity' shows only them.
+  owner_type?: 'individual' | 'entity';
 }
 
 // ─── Build URLSearchParams ─────────────────────────────────────────────────────
@@ -45,6 +48,7 @@ export function buildParams(filters: ListingFilters, page: number, pageSize = 50
   if (filters.min_balance != null) p.set('min_balance', String(filters.min_balance));
   if (filters.min_tickets != null) p.set('min_tickets', String(filters.min_tickets));
   if (filters.absentee) p.set('absentee', 'true');
+  if (filters.owner_type) p.set('owner_type', filters.owner_type);
 
   return p;
 }

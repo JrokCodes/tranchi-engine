@@ -57,6 +57,7 @@ export default function Listings() {
       min_balance: searchParams.get('min_balance') ?? '',
       min_tickets: searchParams.get('min_tickets') ?? '',
       absentee: searchParams.get('absentee') === 'true',
+      owner_type: (searchParams.get('owner_type') as 'individual' | 'entity') ?? '',
     };
   });
 
@@ -89,6 +90,7 @@ export default function Listings() {
     if (newFilters.min_balance) next.set('min_balance', newFilters.min_balance);
     if (newFilters.min_tickets) next.set('min_tickets', newFilters.min_tickets);
     if (newFilters.absentee) next.set('absentee', 'true');
+    if (newFilters.owner_type) next.set('owner_type', newFilters.owner_type);
     setSearchParams(next, { replace: true });
   }
 
@@ -129,6 +131,7 @@ export default function Listings() {
     min_balance: filters.min_balance ? Number(filters.min_balance) : undefined,
     min_tickets: filters.min_tickets ? Number(filters.min_tickets) : undefined,
     absentee: filters.absentee || undefined,
+    owner_type: filters.owner_type || undefined,
   };
 
   const { data, isLoading, isError } = useListings(apiFilters, page);
@@ -401,11 +404,21 @@ function ListingRow({ item, index, onClick }: RowProps) {
         </span>
       </td>
 
-      {/* Conviction tier (Wayne–Detroit blight leads only; empty cell on all other listings) */}
+      {/* Lead flags: conviction tier (Wayne blight) + Investor (entity-owned pre-distress, any market) */}
       <td className="px-4">
-        {item.conviction_tier && (
-          <ConvictionTierBadge tier={item.conviction_tier} />
-        )}
+        <div className="flex flex-wrap items-center gap-1">
+          {item.conviction_tier && (
+            <ConvictionTierBadge tier={item.conviction_tier} />
+          )}
+          {item.owner_is_entity && item.distress_stage === 'distress_signal' && (
+            <span
+              className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium border bg-(--color-navy)/5 text-(--color-navy) border-(--color-navy)/15 whitespace-nowrap"
+              title="Owner is a business/investor entity (LLC, Inc, Capital, Properties…) — a professional landlord/flipper, a weaker motivated-seller lead than an individual owner"
+            >
+              Investor
+            </span>
+          )}
+        </div>
       </td>
 
       {/* Signals */}
