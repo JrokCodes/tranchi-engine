@@ -395,24 +395,33 @@ async def _fetch_roster_for_date(
     listings: list[RawListing] = []
     ts = str(int(datetime.now().timestamp() * 1000))
 
-    # ── Step 3: LOAD AREA C ──────────────────────────────────────────────────
+    # ── Step 3: LOAD AREA C (Closed/Canceled) — NOT ingested ─────────────────
+    # INVARIANT: AREA C is RealForeclose's "Auctions Closed or Canceled" bucket.
+    # For a future-dated sale these are auctions CANCELED before the sale (e.g.
+    # "Canceled per Bankruptcy") — they are NOT live buy-now deals. The retHTML
+    # carries no "Auction Status" field — only "Case Status", which stays ACTIVE
+    # (the court case is still open even when the auction is canceled) — so the
+    # AREA is the ONLY canceled-vs-live discriminator. We load it only to log how
+    # many we exclude; we do NOT ingest it. (Bug fixed 2026-06-29: AREA C rows
+    # were surfacing as active sheriff sales — a live verify caught 2 canceled
+    # auctions in the feed. Existing AREA-C rows age out via FULL_RESCAN.)
     c_listings = await _load_area(
         client, area="C", sale_date=sale_date, today=today, ts=ts
     )
-    listings.extend(c_listings)
 
-    # ── Step 3: LOAD AREA W (paginated) ──────────────────────────────────────
+    # ── Step 3: LOAD AREA W (Waiting = scheduled) — the live buy-now auctions ─
     w_listings = await _load_area(
         client, area="W", sale_date=sale_date, today=today, ts=ts
     )
     listings.extend(w_listings)
 
     logger.info(
-        "RealForeclose: %s → %d listings (C=%d W=%d mortgage=%d tax=%d)",
+        "RealForeclose: %s → %d listings (W=%d ingested, C=%d canceled/closed excluded, "
+        "mortgage=%d tax=%d)",
         auction_date,
         len(listings),
-        len(c_listings),
         len(w_listings),
+        len(c_listings),
         sum(1 for l in listings if l.signal_type == "mortgage_foreclosure"),
         sum(1 for l in listings if l.signal_type == "tax_delinquent_foreclosure"),
     )
