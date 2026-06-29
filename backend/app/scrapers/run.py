@@ -1039,6 +1039,76 @@ async def _retire_unverifiable_dayton_foreclosures(pool: asyncpg.Pool) -> int:
         return 0
 
 
+# Montgomery County, OH municipality + township roster (lowercase). A DCR foreclosure
+# notice that arrives PARCEL-LESS (no extractable PARID) can only be sited by its city;
+# the DCR legal-notice feed is regional, so a parcel-less row whose city is NOT in this
+# set is a cross-county leak (Franklin/Greene/Clark/Miami/Hamilton…) we cannot verify
+# against the Montgomery AUDGIS spine. Kept deliberately generous to avoid retiring a
+# valid Montgomery address-only filing. Rows that DO resolve to a real Montgomery parcel
+# are authoritative regardless of the city string and are never touched by this gate.
+_MONTGOMERY_MUNIS: frozenset[str] = frozenset({
+    "dayton", "kettering", "huber heights", "centerville", "miamisburg",
+    "west carrollton", "trotwood", "englewood", "vandalia", "riverside",
+    "oakwood", "moraine", "clayton", "brookville", "germantown", "union",
+    "drexel", "new lebanon", "phillipsburg", "farmersville", "verona",
+    "northridge", "shiloh", "harrison township", "washington township",
+    "butler township", "jefferson township", "jackson township",
+    "miami township", "perry township", "clay township", "german township",
+})
+
+
+async def _retire_invalid_dayton_foreclosure_addresses(pool: asyncpg.Pool) -> int:
+    """Retire Dayton foreclosure listings whose ADDRESS is not a verifiable Montgomery
+    property. Two parse-pathology classes the parcel-based guards above cannot catch
+    (they only fire once a row has resolved to a spine parcel; these never resolve):
+
+      1. COURTHOUSE ARTIFACT — property_address is '41 N Perry St' (± 'Room NNN'), the
+         Montgomery County Courts Building. When a DCR notice has no usable property
+         address the parser falls back to the court/filing address; the row then looks
+         like 56 different homes 'for sale' at the courthouse. Never a real property.
+      2. CROSS-COUNTY LEAK — a PARCEL-LESS foreclosure (no PARID resolved) whose
+         property_city is non-blank and NOT in _MONTGOMERY_MUNIS. The DCR feed carries
+         Franklin/Greene/Clark/Miami/Hamilton notices; without a Montgomery parcel they
+         are unverifiable against AUDGIS.
+
+    INVARIANT: a foreclosure listing that resolves to a real Montgomery parcel
+    (source_listing_id present) is authoritative and is NEVER retired here — this gate
+    only removes the courthouse address (any state) and parcel-less out-of-county rows.
+    Legitimate Montgomery address-only filings (city in the roster) are kept. Idempotent;
+    market-scoped to dayton. Runs each cycle after _retire_unverifiable_dayton_foreclosures.
+    """
+    _norm = "regexp_replace(regexp_replace(upper(trim({col})), '[^A-Z0-9 ]', '', 'g'), ' +', ' ', 'g')"
+    try:
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                f"""
+                UPDATE tranchi.listings AS l
+                SET status = 'expired'
+                WHERE l.market = 'dayton'
+                  AND l.status = 'active'
+                  AND l.signal_type IN ('mortgage_foreclosure', 'foreclosure_filing', 'tax_delinquent_foreclosure')
+                  AND (
+                    {_norm.format(col='l.property_address')} LIKE '41 N PERRY ST%'
+                    OR (
+                      (l.source_listing_id IS NULL OR l.source_listing_id = '')
+                      AND l.property_city IS NOT NULL AND trim(l.property_city) <> ''
+                      AND lower(trim(l.property_city)) <> ALL($1::text[])
+                    )
+                  )
+                """,
+                list(_MONTGOMERY_MUNIS),
+            )
+            count = int(result.split()[-1]) if result else 0
+            if count > 0:
+                logger.info(
+                    "Dayton: retired %d foreclosure listings on courthouse/out-of-county addresses", count
+                )
+            return count
+    except Exception as exc:
+        logger.warning("Dayton invalid-foreclosure-address retire failed: %s", exc)
+        return 0
+
+
 async def _flag_incomplete_addresses(pool: asyncpg.Pool) -> int:
     """Tag active listings whose address has no leading house number.
 
@@ -1387,6 +1457,7 @@ async def main() -> int:
             no_num = await _flag_incomplete_addresses(pool)
             transferred = await _mark_transferred_listings(pool)
             await _retire_unverifiable_dayton_foreclosures(pool)
+            await _retire_invalid_dayton_foreclosure_addresses(pool)
             redeem_win = await _compute_redemption_windows(pool)
             mi_redeem = await _compute_mi_redemption(pool)
             finalized = await _finalize_expired_redemptions(pool)
